@@ -228,21 +228,22 @@ void loop(){
       songRequestPending = true;
     } else {
       songRequestPending = false;
-      uartSubscribed = false;
       NimBLEDevice::startAdvertising();
     }
     lastConnected = kbConnected;
   }
 
   // Restart if no connection after 30s
-  if (!kbConnected && (now - lastConnectAttempt > 30000)) {
+  bool anyConnection = kbConnected || uartSubscribed;
+
+  if (!anyConnection && (now - lastConnectAttempt > 30000)) {
     Serial.println("No connection after 30s — restarting...");
     drawBottomStatic("Restarting");
     delay(1500);
     ESP.restart();
   }
 
-  if (kbConnected) lastConnectAttempt = now;
+  if (anyConnection) lastConnectAttempt = now;
 
   if(songRequestPending && uartTX && uartSubscribed) {
     sendUartNotification("REQ|SONG");
