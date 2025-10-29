@@ -14,28 +14,18 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor Apple Music playback."
-    private static let nowPlayingInfoCenterNotifications: [Notification.Name] = {
-        var names: [Notification.Name] = [
-            Notification.Name("MPNowPlayingInfoCenterDidChangeNotification"),
-            Notification.Name("MPNowPlayingInfoDidChange"),
-            Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
-        ]
-
-        if let compatibilityName = NowPlayingManager.typedNowPlayingInfoCenterNotification() {
-            names.insert(compatibilityName, at: 0)
+    private static let nowPlayingInfoDidChangeNotification: Notification.Name = {
+        if let typed = MPNowPlayingInfoCenter.typedDidChangeNotification {
+            return typed
         }
 
-        var unique: [Notification.Name] = []
-        var seen = Set<String>()
-
-        for name in names {
-            if seen.insert(name.rawValue).inserted {
-                unique.append(name)
-            }
-        }
-
-        return unique
+        // Fallback for SDKs that omit the typed constant but still post the same name.
+        return Notification.Name("MPNowPlayingInfoDidChange")
     }()
+    private static let legacyNowPlayingInfoNotifications: [Notification.Name] = [
+        Notification.Name("MPNowPlayingInfoCenterDidChangeNotification"),
+        Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
+    ]
     private static let nowPlayingInfoTitleKeys: [String] = [
         MPMediaItemPropertyTitle,
         "kMRMediaRemoteNowPlayingInfoTitle",
@@ -107,8 +97,12 @@ final class NowPlayingManager: ObservableObject {
         if !notificationsActive {
             notificationsActive = true
 
-            Self.nowPlayingInfoCenterNotifications.forEach { name in
-                NotificationCenter.default.publisher(for: name, object: MPNowPlayingInfoCenter.default())
+            var observedNames = Set<String>()
+
+            ([Self.nowPlayingInfoDidChangeNotification] + Self.legacyNowPlayingInfoNotifications).forEach { name in
+                guard observedNames.insert(name.rawValue).inserted else { return }
+
+                NotificationCenter.default.publisher(for: name, object: nil)
                     .sink { [weak self] _ in
                         self?.updateNowPlayingMetadata()
                     }
@@ -259,30 +253,6 @@ private extension String {
 }
 
 private extension NowPlayingManager {
-    private static func typedNowPlayingInfoCenterNotification() -> Notification.Name? {
-        guard let frameworkHandle = dlopen("/System/Library/Frameworks/MediaPlayer.framework/MediaPlayer", RTLD_LAZY) else {
-            return nil
-        }
-
-        defer { dlclose(frameworkHandle) }
-
-        guard let symbol = dlsym(frameworkHandle, "MPNowPlayingInfoCenterDidChangeNotification") else {
-            return nil
-        }
-
-        let pointer = symbol.assumingMemoryBound(to: Optional<AnyObject>.self)
-
-        guard let nsString = pointer.pointee as? NSString else {
-            return nil
-        }
-
-        let rawValue = nsString.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !rawValue.isEmpty else { return nil }
-
-        return Notification.Name(rawValue as String)
-    }
-
     static let nowPlayingInfoTitleHints = ["title", "song", "track", "name"]
     static let nowPlayingInfoArtistHints = ["artist", "performer", "subtitle", "channel", "singer"]
     static let nowPlayingInfoAlbumHints = ["album", "collection", "playlist"]
@@ -351,5 +321,31 @@ private extension NowPlayingManager {
         }
 
         return nil
+    }
+}
+
+private extension MPNowPlayingInfoCenter {
+    static var typedDidChangeNotification: Notification.Name? {
+        guard let handle = dlopen("/System/Library/Frameworks/MediaPlayer.framework/MediaPlayer", RTLD_LAZY) else {
+            return nil
+        }
+
+        defer { dlclose(handle) }
+
+        guard let symbol = dlsym(handle, "MPNowPlayingInfoCenterDidChangeNotification") else {
+            return nil
+        }
+
+        let pointer = symbol.assumingMemoryBound(to: Optional<AnyObject>.self)
+
+        guard let rawString = pointer.pointee as? NSString else {
+            return nil
+        }
+
+        let trimmed = rawString.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmed.isEmpty else { return nil }
+
+        return Notification.Name(trimmed as String)
     }
 }
