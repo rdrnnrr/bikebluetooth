@@ -15,8 +15,8 @@ final class NowPlayingManager: ObservableObject {
 
     private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor Apple Music playback."
     private static let nowPlayingInfoCenterNotifications: [Notification.Name] = [
-        Notification.Name("MPNowPlayingInfoDidChange"),
-        Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
+        MPNowPlayingInfoCenter.didChangeNotification,
+        Notification.Name("MPNowPlayingInfoDidChange")
     ]
     private static let nowPlayingInfoTitleKeys: [String] = [
         MPMediaItemPropertyTitle,
@@ -101,7 +101,7 @@ final class NowPlayingManager: ObservableObject {
             notificationsActive = true
 
             Self.nowPlayingInfoCenterNotifications.forEach { name in
-                NotificationCenter.default.publisher(for: name, object: nil)
+                NotificationCenter.default.publisher(for: name, object: MPNowPlayingInfoCenter.default())
                     .sink { [weak self] _ in
                         self?.updateNowPlayingMetadata()
                     }
