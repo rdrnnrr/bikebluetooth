@@ -30,9 +30,6 @@ NimBLEService* uartSvc = nullptr;
 NimBLECharacteristic* uartRX = nullptr;
 NimBLECharacteristic* uartTX = nullptr;
 String uartBuffer = "";
-String pendingLegacySongCommand = "";
-uint32_t pendingLegacySongSince = 0;
-const uint32_t LEGACY_SONG_GRACE_MS = 250;
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -223,9 +220,6 @@ class RXCB : public NimBLECharacteristicCallbacks {
     std::string v = c->getValue();
     if(v.empty()) return;
 
-    pendingLegacySongSince = 0;
-    pendingLegacySongCommand = "";
-
     uartBuffer += String(v.c_str());
     if(uartBuffer.length() > 256) {
       uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
@@ -236,29 +230,48 @@ class RXCB : public NimBLECharacteristicCallbacks {
       String message = uartBuffer.substring(0, newlineIndex);
       uartBuffer.remove(0, newlineIndex + 1);
       message.trim();
-      pendingLegacySongSince = 0;
-      pendingLegacySongCommand = "";
       handleUartMessage(message);
       newlineIndex = uartBuffer.indexOf('\n');
     }
 
     // Support legacy single-packet commands that omit a newline terminator.
     if(uartBuffer.length() > 0) {
-      String pending = uartBuffer;
-      pending.trim();
+      int start = 0;
+      while(start < uartBuffer.length()) {
+        char c = uartBuffer.charAt(start);
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          start++;
+        } else {
+          break;
+        }
+      }
 
-      int p1 = pending.indexOf('|');
-      if(p1 > 0) {
-        int p2 = pending.indexOf('|', p1 + 1);
-        if(p2 > 0) {
-          int p3 = pending.indexOf('|', p2 + 1);
-          if(p3 > 0 && pending.indexOf('\n') < 0 && pending.startsWith("SONG|")) {
-            if(pendingLegacySongSince == 0) {
-              pendingLegacySongSince = millis();
-              pendingLegacySongCommand = pending;
+      int end = uartBuffer.length();
+      while(end > start) {
+        char c = uartBuffer.charAt(end - 1);
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          end--;
+        } else {
+          break;
+        }
+      }
+
+      if(start < end) {
+        String pending = uartBuffer.substring(start, end);
+
+        int p1 = pending.indexOf('|');
+        if(p1 > 0) {
+          int p2 = pending.indexOf('|', p1 + 1);
+          if(p2 > 0) {
+            int p3 = pending.indexOf('|', p2 + 1);
+            if(p3 > 0) {
+              handleUartMessage(pending);
+              uartBuffer.remove(0, end);
             }
           }
         }
+      } else {
+        uartBuffer = "";
       }
     }
   }
@@ -319,19 +332,6 @@ void setup(){
 // ===== LOOP =====
 void loop(){
   uint32_t now = millis();
-
-  if(pendingLegacySongSince > 0) {
-    if(now - pendingLegacySongSince >= LEGACY_SONG_GRACE_MS) {
-      String pending = uartBuffer;
-      pending.trim();
-      if(pending.length() > 0 && pending == pendingLegacySongCommand) {
-        handleUartMessage(pending);
-        uartBuffer = "";
-      }
-      pendingLegacySongSince = 0;
-      pendingLegacySongCommand = "";
-    }
-  }
 
   bool kbConnected = bleKeyboard.isConnected();
   if(kbConnected != lastConnected) {
