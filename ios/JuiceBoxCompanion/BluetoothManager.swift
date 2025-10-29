@@ -221,6 +221,21 @@ final class BluetoothManager: NSObject, ObservableObject {
     }
 
     private func isTargetPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any] = [:]) -> Bool {
+        if let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID],
+           advertisedServices.contains(serviceUUID) {
+            return true
+        }
+
+        if let overflowServices = advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID],
+           overflowServices.contains(serviceUUID) {
+            return true
+        }
+
+        if let storedIdentifier = UserDefaults.standard.string(forKey: knownPeripheralKey),
+           peripheral.identifier.uuidString == storedIdentifier {
+            return true
+        }
+
         var candidates: [String] = []
 
         if let name = peripheral.name?.lowercased() {
