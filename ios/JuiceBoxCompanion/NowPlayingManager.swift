@@ -12,7 +12,8 @@ final class NowPlayingManager: ObservableObject {
         static let empty = Song(artist: "", album: "", title: "")
     }
 
-    private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor playback."
+    private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor Apple Music playback."
+    private static let nowPlayingInfoCenterDidChangeNotification = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
 
     @Published private(set) var currentSong: Song = .empty
     @Published private(set) var authorizationError: String?
@@ -21,6 +22,7 @@ final class NowPlayingManager: ObservableObject {
     private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
     private var notificationsActive = false
     private var wantsMonitoring = false
+    private var musicPlayerMonitoringActive = false
 
     init(preview: Bool = false) {
         if preview {
@@ -40,30 +42,9 @@ final class NowPlayingManager: ObservableObject {
 
     func stopMonitoring() {
         wantsMonitoring = false
-        if notificationsActive {
-            musicPlayer.endGeneratingPlaybackNotifications()
-        }
+        deactivateMusicPlayerMonitoring()
         notificationsActive = false
         cancellables.removeAll()
-    }
-
-    private func updateFromMusicPlayer() {
-        guard notificationsActive else { return }
-
-        let item = musicPlayer.nowPlayingItem
-        let title = item?.title ?? ""
-        let artist = item?.artist ?? ""
-        let album = item?.albumTitle ?? ""
-
-        let song = Song(artist: artist, album: album, title: title)
-
-        DispatchQueue.main.async {
-            if song == .empty {
-                self.currentSong = .empty
-            } else {
-                self.currentSong = song
-            }
-        }
     }
 
     private func startMonitoringIfNeeded() {
@@ -71,73 +52,142 @@ final class NowPlayingManager: ObservableObject {
             return
         }
 
+        if !notificationsActive {
+            notificationsActive = true
+
+            NotificationCenter.default.publisher(
+                for: Self.nowPlayingInfoCenterDidChangeNotification,
+                object: MPNowPlayingInfoCenter.default()
+            )
+                .sink { [weak self] _ in
+                    self?.updateNowPlayingMetadata()
+                }
+                .store(in: &cancellables)
+
+            NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
+                .sink { [weak self] _ in
+                    self?.updateNowPlayingMetadata()
+                }
+                .store(in: &cancellables)
+
+            Timer.publish(every: 5, on: .main, in: .common)
+                .autoconnect()
+                .sink { [weak self] _ in
+                    self?.updateNowPlayingMetadata()
+                }
+                .store(in: &cancellables)
+        }
+
+        configureMusicPlayerMonitoring()
+        updateNowPlayingMetadata()
+    }
+
+    private func configureMusicPlayerMonitoring() {
         let status = MPMediaLibrary.authorizationStatus()
 
         switch status {
         case .authorized:
-            break
+            activateMusicPlayerMonitoring()
         case .notDetermined:
             MPMediaLibrary.requestAuthorization { [weak self] newStatus in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
                     if newStatus == .authorized {
                         self.authorizationError = nil
-                        self.startMonitoringIfNeeded()
+                        self.activateMusicPlayerMonitoring()
+                        self.updateNowPlayingMetadata()
                     } else {
-                        self.authorizationError = Self.authorizationMessage
-                        self.currentSong = .empty
+                        self.handleMediaLibraryDenied()
                     }
                 }
             }
-            return
         default:
-            DispatchQueue.main.async {
-                self.authorizationError = Self.authorizationMessage
-                self.currentSong = .empty
+            DispatchQueue.main.async { [weak self] in
+                self?.handleMediaLibraryDenied()
             }
-            return
         }
+    }
 
-        guard !notificationsActive else {
-            updateFromMusicPlayer()
-            return
-        }
+    private func activateMusicPlayerMonitoring() {
+        guard !musicPlayerMonitoringActive else { return }
 
-        notificationsActive = true
-        authorizationError = nil
+        musicPlayerMonitoringActive = true
         musicPlayer.beginGeneratingPlaybackNotifications()
 
         NotificationCenter.default.publisher(for: .MPMusicPlayerControllerNowPlayingItemDidChange, object: musicPlayer)
             .sink { [weak self] _ in
-                self?.updateFromMusicPlayer()
+                self?.updateNowPlayingMetadata()
             }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .MPMusicPlayerControllerPlaybackStateDidChange, object: musicPlayer)
             .sink { [weak self] _ in
-                self?.updateFromMusicPlayer()
+                self?.updateNowPlayingMetadata()
             }
             .store(in: &cancellables)
+    }
 
-        NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
-            .sink { [weak self] _ in
-                self?.updateFromMusicPlayer()
+    private func deactivateMusicPlayerMonitoring() {
+        guard musicPlayerMonitoringActive else { return }
+        musicPlayer.endGeneratingPlaybackNotifications()
+        musicPlayerMonitoringActive = false
+    }
+
+    private func handleMediaLibraryDenied() {
+        if songFromNowPlayingInfo(MPNowPlayingInfoCenter.default().nowPlayingInfo) == nil {
+            authorizationError = Self.authorizationMessage
+            currentSong = .empty
+        }
+    }
+
+    private func updateNowPlayingMetadata() {
+        guard notificationsActive else { return }
+
+        let infoSong = songFromNowPlayingInfo(MPNowPlayingInfoCenter.default().nowPlayingInfo)
+        let playerSong = musicPlayerMonitoringActive ? songFromMediaItem(musicPlayer.nowPlayingItem) : nil
+        let song = infoSong ?? playerSong ?? .empty
+
+        DispatchQueue.main.async {
+            if song != .empty {
+                self.authorizationError = nil
             }
-            .store(in: &cancellables)
+            self.currentSong = song
+        }
+    }
 
-        Timer.publish(every: 5, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                self?.updateFromMusicPlayer()
-            }
-            .store(in: &cancellables)
+    private func songFromNowPlayingInfo(_ info: [String: Any]?) -> Song? {
+        guard let info = info else { return nil }
 
-        updateFromMusicPlayer()
+        let title = (info[MPMediaItemPropertyTitle] as? String)?.trimmed ?? ""
+        let artist = ((info[MPMediaItemPropertyArtist] as? String) ?? (info[MPMediaItemPropertyAlbumArtist] as? String))?.trimmed ?? ""
+        let album = (info[MPMediaItemPropertyAlbumTitle] as? String)?.trimmed ?? ""
+
+        guard [title, artist, album].contains(where: { !$0.isEmpty }) else { return nil }
+
+        return Song(artist: artist, album: album, title: title)
+    }
+
+    private func songFromMediaItem(_ item: MPMediaItem?) -> Song? {
+        guard let item = item else { return nil }
+
+        let title = item.title?.trimmed ?? ""
+        let artist = item.artist?.trimmed ?? ""
+        let album = item.albumTitle?.trimmed ?? ""
+
+        guard [title, artist, album].contains(where: { !$0.isEmpty }) else { return nil }
+
+        return Song(artist: artist, album: album, title: title)
     }
 
     @MainActor
     func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+}
+
+private extension String {
+    var trimmed: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
