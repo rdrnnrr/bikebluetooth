@@ -3,6 +3,10 @@ import Combine
 import MediaPlayer
 import UIKit
 
+private extension Notification.Name {
+    static let MPNowPlayingInfoCenterNowPlayingInfoDidChange = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
+}
+
 final class NowPlayingManager: ObservableObject {
     struct Song: Equatable {
         var artist: String
