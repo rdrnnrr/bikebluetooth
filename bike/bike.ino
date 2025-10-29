@@ -29,6 +29,7 @@ static const char* UART_TX_UUID  = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 NimBLEService* uartSvc = nullptr;
 NimBLECharacteristic* uartRX = nullptr;
 NimBLECharacteristic* uartTX = nullptr;
+String uartBuffer = "";
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -42,9 +43,6 @@ uint32_t tUp=0, tDn=0, tL=0, tR=0, tBtn=0;
 
 // ===== STATE =====
 bool lastConnected = false;
-uint32_t lastBlink = 0;
-bool blinkOn = false;
-String bottomText = "Ready";
 String artist = "";
 String album = "";
 String song = "";
@@ -56,6 +54,9 @@ bool uartSubscribed = false;
 
 // Forward declarations
 void sendUartNotification(const String& message);
+void handleUartMessage(const String& message);
+String sanitizeForDisplay(const String& input);
+bool appendMappedCodepoint(String& out, uint32_t codepoint);
 
 // ===== HELPERS =====
 inline bool inDZ(float v){ return fabs(v) < DEADZONE; }
@@ -131,38 +132,163 @@ void showBoot(){ oledTop.clearDisplay(); oledBot.clearDisplay(); drawBottomStati
 void showReady(){ drawTopInfo(); drawBottomStatic("Ready"); }
 
 // ===== UART CALLBACK =====
-class RXCB : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*ci*/) override {
-    std::string v = c->getValue();
-    if(v.empty()) return;
-    String s = String(v.c_str());
-
-    // Expected format: SONG|Artist|Album|Title
-    int p1 = s.indexOf('|');
-    if(p1 < 0) return;
-    String cmd = s.substring(0, p1);
-
-    if(cmd == "SONG") {
-      int p2 = s.indexOf('|', p1+1);
-      int p3 = s.indexOf('|', p2+1);
-      if(p2 < 0 || p3 < 0) return;
-
-      artist = s.substring(p1+1, p2);
-      album  = s.substring(p2+1, p3);
-      song   = s.substring(p3+1);
-      drawTopInfo();
-      scrollOffset = 0;
-      sendUartNotification("ACK");
-    }
-  }
-};
-
 class TXCB : public NimBLECharacteristicCallbacks {
 public:
   void onSubscribe(NimBLECharacteristic* /*c*/, NimBLEConnInfo& /*ci*/, uint16_t subValue) override {
     uartSubscribed = (subValue != 0);
     if(uartSubscribed) {
       songRequestPending = true;
+      if(song.length() == 0) {
+        // ensure we clear any stale scroll state before the app pushes data
+        scrollOffset = 0;
+      }
+    } else {
+      songRequestPending = false;
+      uartBuffer = "";
+      NimBLEDevice::startAdvertising();
+    }
+  }
+};
+
+String sanitizeForDisplay(const String& input) {
+  String sanitized;
+  sanitized.reserve(input.length());
+
+  for (uint16_t i = 0; i < input.length();) {
+    uint8_t b = static_cast<uint8_t>(input.charAt(i));
+
+    if (b < 0x80) {
+      if (b >= 32 && b <= 126) {
+        sanitized += static_cast<char>(b);
+      } else if (b == '\t') {
+        sanitized += ' ';
+      }
+      i++;
+      continue;
+    }
+
+    uint32_t codepoint = 0;
+    uint8_t needed = 0;
+
+    if ((b & 0xE0) == 0xC0 && (i + 1) < input.length()) {
+      codepoint = ((uint32_t)(b & 0x1F) << 6) |
+                  (static_cast<uint32_t>(static_cast<uint8_t>(input.charAt(i + 1))) & 0x3F);
+      needed = 1;
+    } else if ((b & 0xF0) == 0xE0 && (i + 2) < input.length()) {
+      codepoint = ((uint32_t)(b & 0x0F) << 12) |
+                  ((static_cast<uint32_t>(static_cast<uint8_t>(input.charAt(i + 1))) & 0x3F) << 6) |
+                  (static_cast<uint32_t>(static_cast<uint8_t>(input.charAt(i + 2))) & 0x3F);
+      needed = 2;
+    } else if ((b & 0xF8) == 0xF0 && (i + 3) < input.length()) {
+      codepoint = ((uint32_t)(b & 0x07) << 18) |
+                  ((static_cast<uint32_t>(static_cast<uint8_t>(input.charAt(i + 1))) & 0x3F) << 12) |
+                  ((static_cast<uint32_t>(static_cast<uint8_t>(input.charAt(i + 2))) & 0x3F) << 6) |
+                  (static_cast<uint32_t>(static_cast<uint8_t>(input.charAt(i + 3))) & 0x3F);
+      needed = 3;
+    } else {
+      i++;
+      continue;
+    }
+
+    i += needed + 1;
+    if (!appendMappedCodepoint(sanitized, codepoint)) {
+      sanitized += '?';
+    }
+  }
+
+  sanitized.trim();
+  return sanitized;
+}
+
+bool appendMappedCodepoint(String& out, uint32_t cp) {
+  switch (cp) {
+    case 0x2018: case 0x2019: case 0x201A: case 0x2032: case 0x2035:
+      out += '\'';
+      return true;
+    case 0x201C: case 0x201D: case 0x201E:
+      out += '"';
+      return true;
+    case 0x2013: case 0x2014: case 0x2212:
+      out += '-';
+      return true;
+    case 0x2022:
+      out += '*';
+      return true;
+    case 0x2026:
+      out += "...";
+      return true;
+    case 0x2122:
+      out += "TM";
+      return true;
+  }
+
+  if ((cp >= 0x00C0 && cp <= 0x00C5) || cp == 0x0100 || cp == 0x0102 || cp == 0x0104) { out += 'A'; return true; }
+  if ((cp >= 0x00E0 && cp <= 0x00E5) || cp == 0x0101 || cp == 0x0103 || cp == 0x0105) { out += 'a'; return true; }
+  if (cp == 0x00C6) { out += "AE"; return true; }
+  if (cp == 0x00E6) { out += "ae"; return true; }
+  if (cp == 0x00C7 || cp == 0x0106 || cp == 0x0108 || cp == 0x010A || cp == 0x010C) { out += 'C'; return true; }
+  if (cp == 0x00E7 || cp == 0x0107 || cp == 0x0109 || cp == 0x010B || cp == 0x010D) { out += 'c'; return true; }
+  if ((cp >= 0x00C8 && cp <= 0x00CB) || cp == 0x0112 || cp == 0x0114 || cp == 0x0116 || cp == 0x0118 || cp == 0x011A) { out += 'E'; return true; }
+  if ((cp >= 0x00E8 && cp <= 0x00EB) || cp == 0x0113 || cp == 0x0115 || cp == 0x0117 || cp == 0x0119 || cp == 0x011B) { out += 'e'; return true; }
+  if ((cp >= 0x00CC && cp <= 0x00CF) || cp == 0x0128 || cp == 0x012A || cp == 0x012C || cp == 0x012E || cp == 0x0130) { out += 'I'; return true; }
+  if ((cp >= 0x00EC && cp <= 0x00EF) || cp == 0x0129 || cp == 0x012B || cp == 0x012D || cp == 0x012F || cp == 0x0131) { out += 'i'; return true; }
+  if (cp == 0x00D0 || cp == 0x010E) { out += 'D'; return true; }
+  if (cp == 0x00F0 || cp == 0x010F) { out += 'd'; return true; }
+  if (cp == 0x00D1 || cp == 0x0143 || cp == 0x0147) { out += 'N'; return true; }
+  if (cp == 0x00F1 || cp == 0x0144 || cp == 0x0148) { out += 'n'; return true; }
+  if ((cp >= 0x00D2 && cp <= 0x00D6) || cp == 0x014C || cp == 0x0150 || cp == 0x00D8) { out += 'O'; return true; }
+  if ((cp >= 0x00F2 && cp <= 0x00F6) || cp == 0x014D || cp == 0x0151 || cp == 0x00F8) { out += 'o'; return true; }
+  if ((cp >= 0x00D9 && cp <= 0x00DC) || cp == 0x0168 || cp == 0x016A || cp == 0x016C || cp == 0x016E || cp == 0x0170 || cp == 0x0172) { out += 'U'; return true; }
+  if ((cp >= 0x00F9 && cp <= 0x00FC) || cp == 0x0169 || cp == 0x016B || cp == 0x016D || cp == 0x016F || cp == 0x0171 || cp == 0x0173) { out += 'u'; return true; }
+  if (cp == 0x00DD || cp == 0x0178) { out += 'Y'; return true; }
+  if (cp == 0x00FD || cp == 0x00FF) { out += 'y'; return true; }
+  if (cp == 0x00DE) { out += 'T'; return true; }
+  if (cp == 0x00FE) { out += 't'; return true; }
+  if (cp == 0x00DF) { out += 's'; out += 's'; return true; }
+  if (cp == 0x0152) { out += "OE"; return true; }
+  if (cp == 0x0153) { out += "oe"; return true; }
+  if (cp == 0x00B0) { out += 'o'; return true; }
+
+  return false;
+}
+void handleUartMessage(const String& s) {
+  if(!s.length()) return;
+
+  int p1 = s.indexOf('|');
+  if(p1 < 0) return;
+  String cmd = s.substring(0, p1);
+
+  if(cmd == "SONG") {
+    int p2 = s.indexOf('|', p1+1);
+    int p3 = s.indexOf('|', p2+1);
+    if(p2 < 0 || p3 < 0) return;
+
+    artist = sanitizeForDisplay(s.substring(p1+1, p2));
+    album  = sanitizeForDisplay(s.substring(p2+1, p3));
+    song   = sanitizeForDisplay(s.substring(p3+1));
+    drawTopInfo();
+    scrollOffset = 0;
+    sendUartNotification("ACK");
+  }
+}
+
+class RXCB : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*ci*/) override {
+    std::string v = c->getValue();
+    if(v.empty()) return;
+
+    uartBuffer += String(v.c_str());
+    if(uartBuffer.length() > 256) {
+      uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
+    }
+
+    int newlineIndex = uartBuffer.indexOf('\n');
+    while(newlineIndex >= 0) {
+      String message = uartBuffer.substring(0, newlineIndex);
+      uartBuffer.remove(0, newlineIndex + 1);
+      message.trim();
+      handleUartMessage(message);
+      newlineIndex = uartBuffer.indexOf('\n');
     }
   }
 };
