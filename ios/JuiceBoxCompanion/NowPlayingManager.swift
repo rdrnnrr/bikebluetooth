@@ -16,7 +16,7 @@ final class NowPlayingManager: ObservableObject {
     @Published private(set) var authorizationError: String?
 
     private var cancellables = Set<AnyCancellable>()
-    private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
+    private let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
     private var notificationsActive = false
     private var wantsMonitoring = false
 
@@ -32,69 +32,57 @@ final class NowPlayingManager: ObservableObject {
 
     func beginMonitoring() {
         wantsMonitoring = true
-        handleAuthorization(status: MPMediaLibrary.authorizationStatus())
+        authorizationError = nil
+        startMonitoringIfNeeded()
     }
 
     func stopMonitoring() {
         wantsMonitoring = false
-        if notificationsActive {
-            musicPlayer.endGeneratingPlaybackNotifications()
-            notificationsActive = false
-        }
+        notificationsActive = false
         cancellables.removeAll()
     }
 
     private func updateFromNowPlayingInfo() {
-        guard let item = musicPlayer.nowPlayingItem else {
-            DispatchQueue.main.async {
+        guard notificationsActive else { return }
+
+        let info = nowPlayingInfoCenter.nowPlayingInfo ?? [:]
+        let title = info[MPMediaItemPropertyTitle] as? String ?? ""
+        let artist = info[MPMediaItemPropertyArtist] as? String ?? ""
+        let album = info[MPMediaItemPropertyAlbumTitle] as? String ?? ""
+
+        let song = Song(artist: artist, album: album, title: title)
+
+        DispatchQueue.main.async {
+            if song == .empty {
                 self.currentSong = .empty
+            } else {
+                self.currentSong = song
             }
+        }
+    }
+
+    private func startMonitoringIfNeeded() {
+        guard wantsMonitoring, !notificationsActive else {
+            updateFromNowPlayingInfo()
             return
         }
 
-        let song = Song(
-            artist: item.artist ?? "",
-            album: item.albumTitle ?? "",
-            title: item.title ?? ""
-        )
-
-        DispatchQueue.main.async {
-            self.currentSong = song
-        }
-    }
-
-    private func handleAuthorization(status: MPMediaLibraryAuthorizationStatus) {
-        switch status {
-        case .authorized:
-            authorizationError = nil
-            startPlaybackNotificationsIfNeeded()
-        case .notDetermined:
-            authorizationError = nil
-            MPMediaLibrary.requestAuthorization { [weak self] newStatus in
-                DispatchQueue.main.async {
-                    self?.handleAuthorization(status: newStatus)
-                }
-            }
-        case .restricted, .denied:
-            authorizationError = "Enable Media & Apple Music access in Settings to share playback."
-            stopMonitoring()
-            DispatchQueue.main.async {
-                self.currentSong = .empty
-            }
-        @unknown default:
-            authorizationError = "Playback permissions are unavailable."
-            stopMonitoring()
-        }
-    }
-
-    private func startPlaybackNotificationsIfNeeded() {
-        guard wantsMonitoring, !notificationsActive else { return }
-
         notificationsActive = true
-        musicPlayer.beginGeneratingPlaybackNotifications()
 
-        NotificationCenter.default.publisher(for: .MPMusicPlayerControllerNowPlayingItemDidChange)
-            .merge(with: NotificationCenter.default.publisher(for: .MPMusicPlayerControllerPlaybackStateDidChange))
+        NotificationCenter.default.publisher(for: .MPNowPlayingInfoCenterNowPlayingInfoDidChange)
+            .sink { [weak self] _ in
+                self?.updateFromNowPlayingInfo()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
+            .sink { [weak self] _ in
+                self?.updateFromNowPlayingInfo()
+            }
+            .store(in: &cancellables)
+
+        Timer.publish(every: 5, on: .main, in: .common)
+            .autoconnect()
             .sink { [weak self] _ in
                 self?.updateFromNowPlayingInfo()
             }
