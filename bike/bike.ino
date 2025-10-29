@@ -243,24 +243,46 @@ class RXCB : public NimBLECharacteristicCallbacks {
     }
 
     // Support legacy single-packet commands that omit a newline terminator.
+    while(uartBuffer.startsWith("SONG|")) {
+      int p1 = uartBuffer.indexOf('|');
+      int p2 = (p1 >= 0) ? uartBuffer.indexOf('|', p1 + 1) : -1;
+      int p3 = (p2 >= 0) ? uartBuffer.indexOf('|', p2 + 1) : -1;
+      if(p1 < 0 || p2 < 0 || p3 < 0) {
+        break;
+      }
+
+      int nextStart = uartBuffer.indexOf("SONG|", p3 + 1);
+      if(nextStart <= 0) {
+        break;
+      }
+
+      String message = uartBuffer.substring(0, nextStart);
+      message.trim();
+      handleUartMessage(message);
+      uartBuffer.remove(0, nextStart);
+      pendingLegacySongSince = 0;
+      pendingLegacySongCommand = "";
+    }
+
     if(uartBuffer.length() > 0) {
       String pending = uartBuffer;
       pending.trim();
 
-      int p1 = pending.indexOf('|');
-      if(p1 > 0) {
-        int p2 = pending.indexOf('|', p1 + 1);
-        if(p2 > 0) {
-          int p3 = pending.indexOf('|', p2 + 1);
-          if(p3 > 0 && pending.indexOf('\n') < 0 && pending.startsWith("SONG|")) {
-            if(pendingLegacySongSince == 0) {
-              pendingLegacySongSince = millis();
-              pendingLegacySongCommand = pending;
-            }
-          }
+      if(pending.startsWith("SONG|")) {
+        int p1 = pending.indexOf('|');
+        int p2 = (p1 >= 0) ? pending.indexOf('|', p1 + 1) : -1;
+        int p3 = (p2 >= 0) ? pending.indexOf('|', p2 + 1) : -1;
+
+        if(p1 > 0 && p2 > 0 && p3 > 0 && pending.indexOf('\n') < 0) {
+          pendingLegacySongSince = millis();
+          pendingLegacySongCommand = pending;
+          return;
         }
       }
     }
+
+    pendingLegacySongSince = 0;
+    pendingLegacySongCommand = "";
   }
 };
 
