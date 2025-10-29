@@ -222,41 +222,49 @@ final class BluetoothManager: NSObject, ObservableObject {
     }
 
     private func isTargetPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any] = [:]) -> Bool {
-        updateLastSeenNames(for: peripheral, advertisementData: advertisementData)
-
-        if let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID],
-           advertisedServices.contains(serviceUUID) {
-            return true
-        }
-
-        if let overflowServices = advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID],
-           overflowServices.contains(serviceUUID) {
-            return true
-        }
+        let nameCandidates = updateLastSeenNames(for: peripheral, advertisementData: advertisementData)
 
         if let storedIdentifier = UserDefaults.standard.string(forKey: knownPeripheralKey),
            peripheral.identifier.uuidString == storedIdentifier {
             return true
         }
 
-        return hasExpectedName(for: peripheral)
+        if hasExpectedName(for: peripheral) {
+            return true
+        }
+
+        let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let overflowServices = advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? []
+        let includesService = advertisedServices.contains(serviceUUID) || overflowServices.contains(serviceUUID)
+
+        if includesService && nameCandidates.isEmpty {
+            return true
+        }
+
+        return false
     }
 
-    private func updateLastSeenNames(for peripheral: CBPeripheral, advertisementData: [String: Any]) {
-        var candidates: [String] = []
+    @discardableResult
+    private func updateLastSeenNames(for peripheral: CBPeripheral, advertisementData: [String: Any]) -> [String] {
+        var candidates = lastSeenPeripheralNames[peripheral.identifier] ?? []
 
         if let name = peripheral.name?.lowercased(), !name.isEmpty {
-            candidates.append(name)
+            if !candidates.contains(name) {
+                candidates.append(name)
+            }
         }
 
         if let advertisedName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)?.lowercased(),
-           !advertisedName.isEmpty {
+           !advertisedName.isEmpty,
+           !candidates.contains(advertisedName) {
             candidates.append(advertisedName)
         }
 
         if !candidates.isEmpty {
             lastSeenPeripheralNames[peripheral.identifier] = candidates
         }
+
+        return candidates
     }
 
     private func hasExpectedName(for peripheral: CBPeripheral) -> Bool {
