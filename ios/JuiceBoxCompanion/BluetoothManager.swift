@@ -24,7 +24,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     private let serviceUUID = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
     private let rxUUID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
     private let txUUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
-    private let deviceName = "JuiceBox Remote"
+    private let deviceNameKeyword = "juicebox"
     private let centralRestoreIdentifier = "com.juicebox.remote.central"
     private let knownPeripheralKey = "BluetoothManager.knownPeripheral"
 
@@ -35,6 +35,7 @@ final class BluetoothManager: NSObject, ObservableObject {
 
     private var lastSentPayload = SongPayload.empty
     private var pendingScanRequest = false
+    private var scanFallbackWorkItem: DispatchWorkItem?
 
     init(preview: Bool = false) {
         super.init()
@@ -65,10 +66,22 @@ final class BluetoothManager: NSObject, ObservableObject {
             return
         }
 
+        scanFallbackWorkItem?.cancel()
+        scanFallbackWorkItem = nil
+
+        if attemptRetrieveConnectedPeripheral() {
+            errorMessage = nil
+            pendingScanRequest = false
+            return
+        }
+
+        central.stopScan()
+
         central.scanForPeripherals(
             withServices: [serviceUUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
         )
+        scheduleScanFallback()
         connectionDescription = "Scanning for remote…"
         errorMessage = nil
         pendingScanRequest = false
@@ -128,6 +141,8 @@ final class BluetoothManager: NSObject, ObservableObject {
         lastSentPayload = .empty
         connectionDescription = "Scanning for remote…"
         errorMessage = nil
+        scanFallbackWorkItem?.cancel()
+        scanFallbackWorkItem = nil
     }
 
     private func attemptRestoreKnownPeripheral() {
@@ -142,12 +157,81 @@ final class BluetoothManager: NSObject, ObservableObject {
 
         let peripherals = central.retrievePeripherals(withIdentifiers: [uuid])
         if let peripheral = peripherals.first {
+            scanFallbackWorkItem?.cancel()
+            scanFallbackWorkItem = nil
             discoveredPeripheral = peripheral
             connectionDescription = "Reconnecting to remote…"
             peripheral.delegate = self
+            central.stopScan()
             central.connect(peripheral, options: nil)
             isBusy = true
+            errorMessage = nil
         }
+    }
+
+    @discardableResult
+    private func attemptRetrieveConnectedPeripheral() -> Bool {
+        guard let central = central, central.state == .poweredOn else { return false }
+
+        let peripherals = central.retrieveConnectedPeripherals(withServices: [serviceUUID])
+        for peripheral in peripherals where isTargetPeripheral(peripheral) {
+            scanFallbackWorkItem?.cancel()
+            scanFallbackWorkItem = nil
+            central.stopScan()
+            discoveredPeripheral = peripheral
+            peripheral.delegate = self
+            errorMessage = nil
+
+            if peripheral.state == .connected {
+                isConnected = true
+                connectionDescription = "Connected"
+                peripheral.discoverServices([serviceUUID])
+            } else {
+                connectionDescription = "Reconnecting…"
+                isBusy = true
+                central.connect(peripheral, options: nil)
+            }
+
+            return true
+        }
+
+        return false
+    }
+
+    private func scheduleScanFallback() {
+        let fallback = DispatchWorkItem { [weak self] in
+            guard
+                let self = self,
+                let central = self.central,
+                central.state == .poweredOn,
+                !(self.discoveredPeripheral?.state == .connected || self.discoveredPeripheral?.state == .connecting)
+            else { return }
+
+            self.scanFallbackWorkItem = nil
+            central.stopScan()
+            central.scanForPeripherals(
+                withServices: nil,
+                options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+            )
+            self.connectionDescription = "Scanning for remote…"
+        }
+
+        scanFallbackWorkItem = fallback
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: fallback)
+    }
+
+    private func isTargetPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any] = [:]) -> Bool {
+        var candidates: [String] = []
+
+        if let name = peripheral.name?.lowercased() {
+            candidates.append(name)
+        }
+
+        if let advertisedName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)?.lowercased() {
+            candidates.append(advertisedName)
+        }
+
+        return candidates.contains { $0.contains(deviceNameKeyword) }
     }
 }
 
@@ -159,6 +243,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 startScanning()
             }
             attemptRestoreKnownPeripheral()
+            attemptRetrieveConnectedPeripheral()
         case .poweredOff:
             connectionDescription = "Turn on Bluetooth"
             errorMessage = nil
@@ -175,9 +260,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
-        guard peripheral.name == deviceName else { return }
+        guard isTargetPeripheral(peripheral, advertisementData: advertisementData) else { return }
         discoveredPeripheral = peripheral
         central.stopScan()
+        scanFallbackWorkItem?.cancel()
+        scanFallbackWorkItem = nil
         central.connect(peripheral, options: nil)
         isBusy = true
         connectionDescription = "Connecting…"
@@ -211,7 +298,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
-            for peripheral in peripherals where peripheral.name == deviceName {
+            for peripheral in peripherals where isTargetPeripheral(peripheral) {
+                scanFallbackWorkItem?.cancel()
+                scanFallbackWorkItem = nil
                 discoveredPeripheral = peripheral
                 peripheral.delegate = self
                 if peripheral.state == .connected {
