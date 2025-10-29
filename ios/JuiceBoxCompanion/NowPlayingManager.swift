@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import MediaPlayer
 import UIKit
+import Darwin
 
 final class NowPlayingManager: ObservableObject {
     struct Song: Equatable {
@@ -13,13 +14,18 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor Apple Music playback."
-    private static let nowPlayingInfoCenterDidChangeNotification = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
+    private static let nowPlayingInfoCenterNotifications: [Notification.Name] = [
+        Notification.Name("MPNowPlayingInfoDidChange"),
+        Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
+    ]
     private static let nowPlayingInfoTitleKeys: [String] = [
         MPMediaItemPropertyTitle,
         "kMRMediaRemoteNowPlayingInfoTitle",
         "title",
         "song",
-        "trackName"
+        "trackName",
+        "kMRMediaRemoteNowPlayingInfoContentTitle",
+        "kMRMediaRemoteNowPlayingInfoQueueItem"
     ]
     private static let nowPlayingInfoArtistKeys: [String] = [
         MPMediaItemPropertyArtist,
@@ -29,14 +35,30 @@ final class NowPlayingManager: ObservableObject {
         "artist",
         "subtitle",
         "performer",
-        "kMRMediaRemoteNowPlayingInfoPerformer"
+        "kMRMediaRemoteNowPlayingInfoPerformer",
+        "kMRMediaRemoteNowPlayingInfoRadioStationName",
+        "kMRMediaRemoteNowPlayingInfoContentAuthor",
+        "kMRMediaRemoteNowPlayingInfoSubtitle"
     ]
     private static let nowPlayingInfoAlbumKeys: [String] = [
         MPMediaItemPropertyAlbumTitle,
         "kMRMediaRemoteNowPlayingInfoAlbum",
         "album",
-        "collection"
+        "collection",
+        "kMRMediaRemoteNowPlayingInfoContentCollection",
+        "kMRMediaRemoteNowPlayingInfoLocalizedAlbumName"
     ]
+
+    private static let mediaRemoteHandle: UnsafeMutableRawPointer? = {
+        dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    }()
+
+    private static let mediaRemoteGetNowPlayingInfo: (@convention(c) (DispatchQueue?, @escaping (CFDictionary?) -> Void) -> Void)? = {
+        guard let symbol = mediaRemoteHandle.flatMap({ dlsym($0, "MRMediaRemoteGetNowPlayingInfo") }) else {
+            return nil
+        }
+        return unsafeBitCast(symbol, to: (@convention(c) (DispatchQueue?, @escaping (CFDictionary?) -> Void) -> Void).self)
+    }()
 
     @Published private(set) var currentSong: Song = .empty
     @Published private(set) var authorizationError: String?
@@ -78,14 +100,13 @@ final class NowPlayingManager: ObservableObject {
         if !notificationsActive {
             notificationsActive = true
 
-            NotificationCenter.default.publisher(
-                for: Self.nowPlayingInfoCenterDidChangeNotification,
-                object: nil
-            )
-                .sink { [weak self] _ in
-                    self?.updateNowPlayingMetadata()
-                }
-                .store(in: &cancellables)
+            Self.nowPlayingInfoCenterNotifications.forEach { name in
+                NotificationCenter.default.publisher(for: name, object: nil)
+                    .sink { [weak self] _ in
+                        self?.updateNowPlayingMetadata()
+                    }
+                    .store(in: &cancellables)
+            }
 
             NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
                 .sink { [weak self] _ in
@@ -157,7 +178,7 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private func handleMediaLibraryDenied() {
-        if songFromNowPlayingInfo(MPNowPlayingInfoCenter.default().nowPlayingInfo) == nil {
+        if songFromNowPlayingInfo(activeNowPlayingInfo()) == nil {
             authorizationError = Self.authorizationMessage
             currentSong = .empty
         }
@@ -166,15 +187,19 @@ final class NowPlayingManager: ObservableObject {
     private func updateNowPlayingMetadata() {
         guard notificationsActive else { return }
 
-        let infoSong = songFromNowPlayingInfo(MPNowPlayingInfoCenter.default().nowPlayingInfo)
-        let playerSong = musicPlayerMonitoringActive ? songFromMediaItem(musicPlayer.nowPlayingItem) : nil
-        let song = infoSong ?? playerSong ?? .empty
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
 
-        DispatchQueue.main.async {
-            if song != .empty {
-                self.authorizationError = nil
+            let infoSong = self.songFromNowPlayingInfo(self.activeNowPlayingInfo())
+            let playerSong = self.musicPlayerMonitoringActive ? self.songFromMediaItem(self.musicPlayer.nowPlayingItem) : nil
+            let song = infoSong ?? playerSong ?? .empty
+
+            DispatchQueue.main.async {
+                if song != .empty {
+                    self.authorizationError = nil
+                }
+                self.currentSong = song
             }
-            self.currentSong = song
         }
     }
 
@@ -188,6 +213,30 @@ final class NowPlayingManager: ObservableObject {
         guard [title, artist, album].contains(where: { !$0.isEmpty }) else { return nil }
 
         return Song(artist: artist, album: album, title: title)
+    }
+
+    private func activeNowPlayingInfo() -> [String: Any]? {
+        if let info = MPNowPlayingInfoCenter.default().nowPlayingInfo, !info.isEmpty {
+            return info
+        }
+
+        guard let fetch = Self.mediaRemoteGetNowPlayingInfo else {
+            return nil
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var remoteInfo: [String: Any]?
+
+        fetch(DispatchQueue.main) { dictionary in
+            if let dict = dictionary as? [String: Any], !dict.isEmpty {
+                remoteInfo = dict
+            }
+            semaphore.signal()
+        }
+
+        _ = semaphore.wait(timeout: .now() + 0.2)
+
+        return remoteInfo
     }
 
     private func songFromMediaItem(_ item: MPMediaItem?) -> Song? {
