@@ -54,7 +54,7 @@ final class NowPlayingManager: ObservableObject {
         if !notificationsActive {
             notificationsActive = true
 
-            NotificationCenter.default.publisher(for: .MPNowPlayingInfoCenterNowPlayingInfoDidChange, object: nil)
+            NotificationCenter.default.publisher(for: .MPNowPlayingInfoDidChange, object: MPNowPlayingInfoCenter.default())
                 .sink { [weak self] _ in
                     self?.updateNowPlayingMetadata()
                 }
