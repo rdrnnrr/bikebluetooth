@@ -30,9 +30,19 @@ NimBLEService* uartSvc = nullptr;
 NimBLECharacteristic* uartRX = nullptr;
 NimBLECharacteristic* uartTX = nullptr;
 String uartBuffer = "";
-String pendingLegacySongCommand = "";
-uint32_t pendingLegacySongSince = 0;
-const uint32_t LEGACY_SONG_GRACE_MS = 250;
+// Delay before treating buffered data as a newline-free legacy packet.
+const uint32_t LEGACY_PACKET_GRACE_MS = 800;
+String legacyPacketCandidate = "";
+uint32_t legacyPacketTimestamp = 0;
+int legacyPacketStart = -1;
+int legacyPacketEnd = -1;
+
+inline void resetLegacyPacketCandidate() {
+  legacyPacketCandidate = "";
+  legacyPacketTimestamp = 0;
+  legacyPacketStart = -1;
+  legacyPacketEnd = -1;
+}
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -59,6 +69,7 @@ bool uartSubscribed = false;
 void sendUartNotification(const String& message);
 void handleUartMessage(const String& message);
 String cleanDisplayText(const String& input);
+void processLegacyPacketCandidate(uint32_t now);
 
 // ===== HELPERS =====
 inline bool inDZ(float v){ return fabs(v) < DEADZONE; }
@@ -147,6 +158,7 @@ public:
     } else {
       songRequestPending = false;
       uartBuffer = "";
+      resetLegacyPacketCandidate();
       NimBLEDevice::startAdvertising();
     }
   }
@@ -223,12 +235,10 @@ class RXCB : public NimBLECharacteristicCallbacks {
     std::string v = c->getValue();
     if(v.empty()) return;
 
-    pendingLegacySongSince = 0;
-    pendingLegacySongCommand = "";
-
     uartBuffer += String(v.c_str());
     if(uartBuffer.length() > 256) {
       uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
+      resetLegacyPacketCandidate();
     }
 
     int newlineIndex = uartBuffer.indexOf('\n');
@@ -236,55 +246,99 @@ class RXCB : public NimBLECharacteristicCallbacks {
       String message = uartBuffer.substring(0, newlineIndex);
       uartBuffer.remove(0, newlineIndex + 1);
       message.trim();
-      pendingLegacySongSince = 0;
-      pendingLegacySongCommand = "";
       handleUartMessage(message);
+      resetLegacyPacketCandidate();
       newlineIndex = uartBuffer.indexOf('\n');
     }
 
     // Support legacy single-packet commands that omit a newline terminator.
-    while(uartBuffer.startsWith("SONG|")) {
-      int p1 = uartBuffer.indexOf('|');
-      int p2 = (p1 >= 0) ? uartBuffer.indexOf('|', p1 + 1) : -1;
-      int p3 = (p2 >= 0) ? uartBuffer.indexOf('|', p2 + 1) : -1;
-      if(p1 < 0 || p2 < 0 || p3 < 0) {
-        break;
-      }
-
-      int nextStart = uartBuffer.indexOf("SONG|", p3 + 1);
-      if(nextStart <= 0) {
-        break;
-      }
-
-      String message = uartBuffer.substring(0, nextStart);
-      message.trim();
-      handleUartMessage(message);
-      uartBuffer.remove(0, nextStart);
-      pendingLegacySongSince = 0;
-      pendingLegacySongCommand = "";
-    }
-
     if(uartBuffer.length() > 0) {
-      String pending = uartBuffer;
-      pending.trim();
-
-      if(pending.startsWith("SONG|")) {
-        int p1 = pending.indexOf('|');
-        int p2 = (p1 >= 0) ? pending.indexOf('|', p1 + 1) : -1;
-        int p3 = (p2 >= 0) ? pending.indexOf('|', p2 + 1) : -1;
-
-        if(p1 > 0 && p2 > 0 && p3 > 0 && pending.indexOf('\n') < 0) {
-          pendingLegacySongSince = millis();
-          pendingLegacySongCommand = pending;
-          return;
+      int start = 0;
+      while(start < uartBuffer.length()) {
+        char c = uartBuffer.charAt(start);
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          start++;
+        } else {
+          break;
         }
       }
-    }
 
-    pendingLegacySongSince = 0;
-    pendingLegacySongCommand = "";
+      int end = uartBuffer.length();
+      while(end > start) {
+        char c = uartBuffer.charAt(end - 1);
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          end--;
+        } else {
+          break;
+        }
+      }
+
+      if(start < end) {
+        String pending = uartBuffer.substring(start, end);
+
+        if(pending.indexOf('\n') >= 0 || pending.indexOf('\r') >= 0) {
+          resetLegacyPacketCandidate();
+          return;
+        }
+
+        int p1 = pending.indexOf('|');
+        if(p1 > 0) {
+          int p2 = pending.indexOf('|', p1 + 1);
+          if(p2 > 0) {
+            int p3 = pending.indexOf('|', p2 + 1);
+            if(p3 > 0) {
+              legacyPacketCandidate = pending;
+              legacyPacketTimestamp = millis();
+              legacyPacketStart = start;
+              legacyPacketEnd = end;
+              return;
+            }
+          }
+        }
+
+        resetLegacyPacketCandidate();
+      } else {
+        uartBuffer = "";
+        resetLegacyPacketCandidate();
+      }
+    } else {
+      resetLegacyPacketCandidate();
+    }
   }
 };
+
+void processLegacyPacketCandidate(uint32_t now) {
+  if(!legacyPacketCandidate.length()) return;
+
+  if(legacyPacketStart < 0 || legacyPacketEnd < 0) {
+    resetLegacyPacketCandidate();
+    return;
+  }
+
+  if(legacyPacketEnd > uartBuffer.length()) {
+    resetLegacyPacketCandidate();
+    return;
+  }
+
+  if(uartBuffer.indexOf('\n') >= 0) {
+    resetLegacyPacketCandidate();
+    return;
+  }
+
+  String current = uartBuffer.substring(legacyPacketStart, legacyPacketEnd);
+  if(current != legacyPacketCandidate) {
+    resetLegacyPacketCandidate();
+    return;
+  }
+
+  if(now - legacyPacketTimestamp < LEGACY_PACKET_GRACE_MS) {
+    return;
+  }
+
+  handleUartMessage(legacyPacketCandidate);
+  uartBuffer.remove(0, legacyPacketEnd);
+  resetLegacyPacketCandidate();
+}
 
 // ===== UART SERVICE =====
 void setupUartService() {
@@ -342,18 +396,7 @@ void setup(){
 void loop(){
   uint32_t now = millis();
 
-  if(pendingLegacySongSince > 0) {
-    if(now - pendingLegacySongSince >= LEGACY_SONG_GRACE_MS) {
-      String pending = uartBuffer;
-      pending.trim();
-      if(pending.length() > 0 && pending == pendingLegacySongCommand) {
-        handleUartMessage(pending);
-        uartBuffer = "";
-      }
-      pendingLegacySongSince = 0;
-      pendingLegacySongCommand = "";
-    }
-  }
+  processLegacyPacketCandidate(now);
 
   bool kbConnected = bleKeyboard.isConnected();
   if(kbConnected != lastConnected) {
