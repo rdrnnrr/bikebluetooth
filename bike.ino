@@ -170,6 +170,7 @@ public:
   void onDisconnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*connInfo*/, int /*reason*/) override {
     songRequestPending = false;
     uartSubscribed = false;
+    NimBLEDevice::startAdvertising();
   }
 };
 
@@ -193,7 +194,8 @@ void setupUartService() {
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(UART_SVC_UUID);
-  adv->setScanResponseData(NimBLEAdvertisementData());
+  adv->setScanResponse(true);
+  adv->start();
 }
 
 void sendUartNotification(const String& message) {
