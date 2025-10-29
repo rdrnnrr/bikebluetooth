@@ -14,7 +14,7 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor Apple Music playback."
-    private static lazy var nowPlayingInfoCenterNotifications: [Notification.Name] = {
+    private static let nowPlayingInfoCenterNotifications: [Notification.Name] = {
         var names: [Notification.Name] = [
             Notification.Name("MPNowPlayingInfoCenterDidChangeNotification"),
             Notification.Name("MPNowPlayingInfoDidChange"),
