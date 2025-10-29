@@ -233,6 +233,47 @@ class RXCB : public NimBLECharacteristicCallbacks {
       handleUartMessage(message);
       newlineIndex = uartBuffer.indexOf('\n');
     }
+
+    // Support legacy single-packet commands that omit a newline terminator.
+    if(uartBuffer.length() > 0) {
+      int start = 0;
+      while(start < uartBuffer.length()) {
+        char c = uartBuffer.charAt(start);
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          start++;
+        } else {
+          break;
+        }
+      }
+
+      int end = uartBuffer.length();
+      while(end > start) {
+        char c = uartBuffer.charAt(end - 1);
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          end--;
+        } else {
+          break;
+        }
+      }
+
+      if(start < end) {
+        String pending = uartBuffer.substring(start, end);
+
+        int p1 = pending.indexOf('|');
+        if(p1 > 0) {
+          int p2 = pending.indexOf('|', p1 + 1);
+          if(p2 > 0) {
+            int p3 = pending.indexOf('|', p2 + 1);
+            if(p3 > 0) {
+              handleUartMessage(pending);
+              uartBuffer.remove(0, end);
+            }
+          }
+        }
+      } else {
+        uartBuffer = "";
+      }
+    }
   }
 };
 
