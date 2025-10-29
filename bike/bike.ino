@@ -220,6 +220,7 @@ class RXCB : public NimBLECharacteristicCallbacks {
     std::string v = c->getValue();
     if(v.empty()) return;
 
+    size_t priorLength = uartBuffer.length();
     uartBuffer += String(v.c_str());
     if(uartBuffer.length() > 256) {
       uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
@@ -235,7 +236,7 @@ class RXCB : public NimBLECharacteristicCallbacks {
     }
 
     // Support legacy single-packet commands that omit a newline terminator.
-    if(uartBuffer.length() > 0) {
+    if(uartBuffer.length() > 0 && priorLength == 0) {
       String pending = uartBuffer;
       pending.trim();
 
@@ -244,7 +245,7 @@ class RXCB : public NimBLECharacteristicCallbacks {
         int p2 = pending.indexOf('|', p1 + 1);
         if(p2 > 0) {
           int p3 = pending.indexOf('|', p2 + 1);
-          if(p3 > 0) {
+          if(p3 > 0 && pending.indexOf('\n') < 0 && pending.indexOf('\r') < 0) {
             handleUartMessage(pending);
             uartBuffer = "";
           }
