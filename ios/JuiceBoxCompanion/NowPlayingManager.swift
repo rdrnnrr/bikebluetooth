@@ -14,10 +14,28 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor Apple Music playback."
-    private static let nowPlayingInfoCenterNotifications: [Notification.Name] = [
-        MPNowPlayingInfoCenter.didChangeNotification,
-        Notification.Name("MPNowPlayingInfoDidChange")
-    ]
+    private static let nowPlayingInfoCenterNotifications: [Notification.Name] = {
+        var names: [Notification.Name] = [
+            Notification.Name("MPNowPlayingInfoCenterDidChangeNotification"),
+            Notification.Name("MPNowPlayingInfoDidChange"),
+            Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
+        ]
+
+        if let compatibilityName = Self.typedNowPlayingInfoCenterNotification() {
+            names.insert(compatibilityName, at: 0)
+        }
+
+        var unique: [Notification.Name] = []
+        var seen = Set<String>()
+
+        for name in names {
+            if seen.insert(name.rawValue).inserted {
+                unique.append(name)
+            }
+        }
+
+        return unique
+    }()
     private static let nowPlayingInfoTitleKeys: [String] = [
         MPMediaItemPropertyTitle,
         "kMRMediaRemoteNowPlayingInfoTitle",
@@ -48,17 +66,6 @@ final class NowPlayingManager: ObservableObject {
         "kMRMediaRemoteNowPlayingInfoContentCollection",
         "kMRMediaRemoteNowPlayingInfoLocalizedAlbumName"
     ]
-
-    private static let mediaRemoteHandle: UnsafeMutableRawPointer? = {
-        dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
-    }()
-
-    private static let mediaRemoteGetNowPlayingInfo: (@convention(c) (DispatchQueue?, @escaping (CFDictionary?) -> Void) -> Void)? = {
-        guard let symbol = mediaRemoteHandle.flatMap({ dlsym($0, "MRMediaRemoteGetNowPlayingInfo") }) else {
-            return nil
-        }
-        return unsafeBitCast(symbol, to: (@convention(c) (DispatchQueue?, @escaping (CFDictionary?) -> Void) -> Void).self)
-    }()
 
     @Published private(set) var currentSong: Song = .empty
     @Published private(set) var authorizationError: String?
@@ -220,23 +227,7 @@ final class NowPlayingManager: ObservableObject {
             return info
         }
 
-        guard let fetch = Self.mediaRemoteGetNowPlayingInfo else {
-            return nil
-        }
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var remoteInfo: [String: Any]?
-
-        fetch(DispatchQueue.main) { dictionary in
-            if let dict = dictionary as? [String: Any], !dict.isEmpty {
-                remoteInfo = dict
-            }
-            semaphore.signal()
-        }
-
-        _ = semaphore.wait(timeout: .now() + 0.2)
-
-        return remoteInfo
+        return nil
     }
 
     private func songFromMediaItem(_ item: MPMediaItem?) -> Song? {
@@ -265,6 +256,30 @@ private extension String {
 }
 
 private extension NowPlayingManager {
+    private static func typedNowPlayingInfoCenterNotification() -> Notification.Name? {
+        guard let frameworkHandle = dlopen("/System/Library/Frameworks/MediaPlayer.framework/MediaPlayer", RTLD_LAZY) else {
+            return nil
+        }
+
+        defer { dlclose(frameworkHandle) }
+
+        guard let symbol = dlsym(frameworkHandle, "MPNowPlayingInfoCenterDidChangeNotification") else {
+            return nil
+        }
+
+        let pointer = symbol.assumingMemoryBound(to: Optional<AnyObject>.self)
+
+        guard let nsString = pointer.pointee as? NSString else {
+            return nil
+        }
+
+        let rawValue = nsString.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !rawValue.isEmpty else { return nil }
+
+        return Notification.Name(rawValue as String)
+    }
+
     static let nowPlayingInfoTitleHints = ["title", "song", "track", "name"]
     static let nowPlayingInfoArtistHints = ["artist", "performer", "subtitle", "channel", "singer"]
     static let nowPlayingInfoAlbumHints = ["album", "collection", "playlist"]
