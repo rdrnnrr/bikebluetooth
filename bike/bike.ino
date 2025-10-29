@@ -30,6 +30,19 @@ NimBLEService* uartSvc = nullptr;
 NimBLECharacteristic* uartRX = nullptr;
 NimBLECharacteristic* uartTX = nullptr;
 String uartBuffer = "";
+// Delay before treating buffered data as a newline-free legacy packet.
+const uint32_t LEGACY_PACKET_GRACE_MS = 800;
+String legacyPacketCandidate = "";
+uint32_t legacyPacketTimestamp = 0;
+int legacyPacketStart = -1;
+int legacyPacketEnd = -1;
+
+inline void resetLegacyPacketCandidate() {
+  legacyPacketCandidate = "";
+  legacyPacketTimestamp = 0;
+  legacyPacketStart = -1;
+  legacyPacketEnd = -1;
+}
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -56,6 +69,7 @@ bool uartSubscribed = false;
 void sendUartNotification(const String& message);
 void handleUartMessage(const String& message);
 String cleanDisplayText(const String& input);
+void processLegacyPacketCandidate(uint32_t now);
 
 // ===== HELPERS =====
 inline bool inDZ(float v){ return fabs(v) < DEADZONE; }
@@ -144,6 +158,7 @@ public:
     } else {
       songRequestPending = false;
       uartBuffer = "";
+      resetLegacyPacketCandidate();
       NimBLEDevice::startAdvertising();
     }
   }
@@ -223,6 +238,7 @@ class RXCB : public NimBLECharacteristicCallbacks {
     uartBuffer += String(v.c_str());
     if(uartBuffer.length() > 256) {
       uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
+      resetLegacyPacketCandidate();
     }
 
     int newlineIndex = uartBuffer.indexOf('\n');
@@ -231,10 +247,98 @@ class RXCB : public NimBLECharacteristicCallbacks {
       uartBuffer.remove(0, newlineIndex + 1);
       message.trim();
       handleUartMessage(message);
+      resetLegacyPacketCandidate();
       newlineIndex = uartBuffer.indexOf('\n');
+    }
+
+    // Support legacy single-packet commands that omit a newline terminator.
+    if(uartBuffer.length() > 0) {
+      int start = 0;
+      while(start < uartBuffer.length()) {
+        char c = uartBuffer.charAt(start);
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          start++;
+        } else {
+          break;
+        }
+      }
+
+      int end = uartBuffer.length();
+      while(end > start) {
+        char c = uartBuffer.charAt(end - 1);
+        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+          end--;
+        } else {
+          break;
+        }
+      }
+
+      if(start < end) {
+        String pending = uartBuffer.substring(start, end);
+
+        if(pending.indexOf('\n') >= 0 || pending.indexOf('\r') >= 0) {
+          resetLegacyPacketCandidate();
+          return;
+        }
+
+        int p1 = pending.indexOf('|');
+        if(p1 > 0) {
+          int p2 = pending.indexOf('|', p1 + 1);
+          if(p2 > 0) {
+            int p3 = pending.indexOf('|', p2 + 1);
+            if(p3 > 0) {
+              legacyPacketCandidate = pending;
+              legacyPacketTimestamp = millis();
+              legacyPacketStart = start;
+              legacyPacketEnd = end;
+              return;
+            }
+          }
+        }
+
+        resetLegacyPacketCandidate();
+      } else {
+        uartBuffer = "";
+        resetLegacyPacketCandidate();
+      }
+    } else {
+      resetLegacyPacketCandidate();
     }
   }
 };
+
+void processLegacyPacketCandidate(uint32_t now) {
+  if(!legacyPacketCandidate.length()) return;
+
+  if(legacyPacketStart < 0 || legacyPacketEnd < 0) {
+    resetLegacyPacketCandidate();
+    return;
+  }
+
+  if(legacyPacketEnd > uartBuffer.length()) {
+    resetLegacyPacketCandidate();
+    return;
+  }
+
+  if(uartBuffer.indexOf('\n') >= 0) {
+    resetLegacyPacketCandidate();
+    return;
+  }
+
+  String current = uartBuffer.substring(legacyPacketStart, legacyPacketEnd);
+  if(current != legacyPacketCandidate) {
+    resetLegacyPacketCandidate();
+    return;
+  }
+
+  if(now - legacyPacketTimestamp < LEGACY_PACKET_GRACE_MS) {
+    return;
+  }
+
+  handleUartMessage(legacyPacketCandidate);
+  uartBuffer.remove(0, legacyPacketEnd);
+  resetLegacyPacketCandidate();
+}
 
 // ===== UART SERVICE =====
 void setupUartService() {
@@ -291,6 +395,8 @@ void setup(){
 // ===== LOOP =====
 void loop(){
   uint32_t now = millis();
+
+  processLegacyPacketCandidate(now);
 
   bool kbConnected = bleKeyboard.isConnected();
   if(kbConnected != lastConnected) {
