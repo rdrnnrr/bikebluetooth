@@ -26,6 +26,11 @@ final class NowPlayingManager: ObservableObject {
         Notification.Name("MPNowPlayingInfoCenterDidChangeNotification"),
         Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
     ]
+    private static let remoteNowPlayingInfoNotifications: [Notification.Name] = [
+        Notification.Name("kMRMediaRemoteNowPlayingInfoDidChangeNotification"),
+        Notification.Name("kMRMediaRemoteNowPlayingInfoDidUpdate"),
+        Notification.Name("kMRMediaRemoteNowPlayingInfoClientPlaybackQueueDidChange")
+    ]
     private static let nowPlayingInfoTitleKeys: [String] = [
         MPMediaItemPropertyTitle,
         "kMRMediaRemoteNowPlayingInfoTitle",
@@ -99,7 +104,10 @@ final class NowPlayingManager: ObservableObject {
 
             var observedNames = Set<String>()
 
-            ([Self.nowPlayingInfoDidChangeNotification] + Self.legacyNowPlayingInfoNotifications).forEach { name in
+            ([Self.nowPlayingInfoDidChangeNotification]
+                + Self.legacyNowPlayingInfoNotifications
+                + Self.remoteNowPlayingInfoNotifications)
+                .forEach { name in
                 guard observedNames.insert(name.rawValue).inserted else { return }
 
                 NotificationCenter.default.publisher(for: name, object: nil)
@@ -259,23 +267,28 @@ private extension NowPlayingManager {
 
     func normalizedString(for keys: [String], hints: [String], in info: [String: Any]) -> String {
         for key in keys {
-            if let normalized = normalizedValue(info[key]) {
+            if let normalized = normalizedScalarValue(info[key]) {
                 return normalized
             }
         }
 
-        for (key, value) in info {
-            let lowerKey = key.lowercased()
-            if hints.contains(where: { lowerKey.contains($0) }), let normalized = normalizedValue(value) {
-                return normalized
-            }
+        if let fallback = fallbackNormalizedString(in: info, preferredKeys: keys, hints: hints) {
+            return fallback
         }
 
         return ""
     }
 
-    func normalizedValue(_ value: Any?) -> String? {
+    func normalizedScalarValue(_ value: Any?) -> String? {
         guard let value else { return nil }
+
+        if value is NSNumber || value is NSDate || value is NSNull {
+            return nil
+        }
+
+        if value is [String: Any] || value is [Any] {
+            return nil
+        }
 
         if let string = value as? String {
             let trimmed = string.trimmed
@@ -292,35 +305,130 @@ private extension NowPlayingManager {
             return trimmed.isEmpty ? nil : trimmed
         }
 
-        if let number = value as? NSNumber {
-            let trimmed = number.stringValue.trimmed
+        if let url = value as? URL {
+            let trimmed = url.lastPathComponent.trimmed
             return trimmed.isEmpty ? nil : trimmed
-        }
-
-        if let dictionary = value as? [String: Any] {
-            for nestedValue in dictionary.values {
-                if let normalized = normalizedValue(nestedValue) {
-                    return normalized
-                }
-            }
-            return nil
-        }
-
-        if let array = value as? [Any] {
-            for element in array {
-                if let normalized = normalizedValue(element) {
-                    return normalized
-                }
-            }
-            return nil
         }
 
         if let describable = value as? CustomStringConvertible {
-            let trimmed = describable.description.trimmed
-            return trimmed.isEmpty ? nil : trimmed
+            let description = describable.description.trimmed
+            return description.isEmpty ? nil : description
         }
 
         return nil
+    }
+
+    func fallbackNormalizedString(in info: [String: Any], preferredKeys: [String], hints: [String]) -> String? {
+        var bestCandidate: (value: String, score: Int)?
+        var visited = Set<String>()
+
+        collectCandidates(in: info, keyPath: [], preferredKeys: preferredKeys, hints: hints) { candidate, score in
+            guard score > 0 else { return }
+            let lowered = candidate.lowercased()
+            guard visited.insert(lowered).inserted else { return }
+
+            if let current = bestCandidate {
+                if score > current.score {
+                    bestCandidate = (candidate, score)
+                }
+            } else {
+                bestCandidate = (candidate, score)
+            }
+        }
+
+        return bestCandidate?.value
+    }
+
+    func collectCandidates(in value: Any, keyPath: [String], preferredKeys: [String], hints: [String], collector: (String, Int) -> Void) {
+        if let string = normalizedScalarValue(value) {
+            let score = score(for: string, keyPath: keyPath, preferredKeys: preferredKeys, hints: hints)
+            guard score > 0 else { return }
+            collector(string, score)
+            return
+        }
+
+        if let dictionary = value as? [String: Any] {
+            for (key, nested) in dictionary {
+                collectCandidates(in: nested, keyPath: keyPath + [key], preferredKeys: preferredKeys, hints: hints, collector: collector)
+            }
+            return
+        }
+
+        if let array = value as? [Any] {
+            for (index, element) in array.enumerated() {
+                collectCandidates(in: element, keyPath: keyPath + ["[\(index)]"], preferredKeys: preferredKeys, hints: hints, collector: collector)
+            }
+        }
+    }
+
+    func score(for string: String, keyPath: [String], preferredKeys: [String], hints: [String]) -> Int {
+        let trimmed = string.trimmed
+        guard !trimmed.isEmpty else { return Int.min }
+
+        var score = 0
+        let lowercasedPath = keyPath.map { $0.lowercased() }
+        let lowerHints = hints.map { $0.lowercased() }
+        let lowerPreferredKeys = preferredKeys.map { $0.lowercased() }
+        let lowerTrimmed = trimmed.lowercased()
+
+        if lowercasedPath.contains(where: { component in
+            lowerPreferredKeys.contains(where: { component.contains($0) })
+        }) {
+            score += 40
+        }
+
+        if lowercasedPath.contains(where: { component in
+            lowerHints.contains(where: { component.contains($0) })
+        }) {
+            score += 30
+        }
+
+        if trimmed.contains("://") {
+            score -= 40
+        }
+
+        if trimmed.contains("com.") {
+            score -= 25
+        }
+
+        if trimmed.contains(".app") {
+            score -= 20
+        }
+
+        if lowerTrimmed.contains("unknown") {
+            score -= 50
+        }
+
+        if ["youtube music", "apple music", "spotify", "tidal", "pandora"].contains(lowerTrimmed) {
+            score -= 25
+        }
+
+        if lowerTrimmed.contains("juce") || lowerTrimmed.contains("juicebox") {
+            score -= 15
+        }
+
+        let wordCount = trimmed.split { $0.isWhitespace }.count
+        if wordCount >= 2 {
+            score += 10
+        }
+
+        let lengthBonus = min(trimmed.count, 60)
+        score += lengthBonus
+
+        let letterCount = trimmed.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+        if letterCount >= max(1, trimmed.count / 2) {
+            score += 6
+        }
+
+        if trimmed == trimmed.uppercased() {
+            score -= 6
+        }
+
+        if trimmed == trimmed.lowercased() {
+            score -= 3
+        }
+
+        return score
     }
 }
 
