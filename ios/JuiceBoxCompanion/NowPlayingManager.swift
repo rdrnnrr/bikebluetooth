@@ -3,10 +3,6 @@ import Combine
 import MediaPlayer
 import UIKit
 
-private extension Notification.Name {
-    static let MPNowPlayingInfoCenterNowPlayingInfoDidChange = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
-}
-
 final class NowPlayingManager: ObservableObject {
     struct Song: Equatable {
         var artist: String
@@ -17,6 +13,7 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor Apple Music playback."
+    private static let nowPlayingInfoCenterDidChangeNotification = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
 
     @Published private(set) var currentSong: Song = .empty
     @Published private(set) var authorizationError: String?
@@ -58,7 +55,10 @@ final class NowPlayingManager: ObservableObject {
         if !notificationsActive {
             notificationsActive = true
 
-            NotificationCenter.default.publisher(for: MPNowPlayingInfoCenter.nowPlayingInfoDidChangeNotification, object: MPNowPlayingInfoCenter.default())
+            NotificationCenter.default.publisher(
+                for: Self.nowPlayingInfoCenterDidChangeNotification,
+                object: MPNowPlayingInfoCenter.default()
+            )
                 .sink { [weak self] _ in
                     self?.updateNowPlayingMetadata()
                 }
