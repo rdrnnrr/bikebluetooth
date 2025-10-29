@@ -36,6 +36,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var lastSentPayload = SongPayload.empty
     private var lastSeenPeripheralNames: [UUID: [String]] = [:]
     private var pendingScanRequest = false
+    private var pendingConnection: CBPeripheral?
     private var scanFallbackWorkItem: DispatchWorkItem?
 
     init(preview: Bool = false) {
@@ -101,6 +102,15 @@ final class BluetoothManager: NSObject, ObservableObject {
             startScanning()
             return
         }
+        guard central.state == .poweredOn else {
+            pendingConnection = peripheral
+            pendingScanRequest = true
+            connectionDescription = "Waiting for Bluetooth…"
+            isBusy = true
+            return
+        }
+
+        pendingConnection = nil
         central.connect(peripheral, options: nil)
         isBusy = true
     }
@@ -140,6 +150,7 @@ final class BluetoothManager: NSObject, ObservableObject {
         txCharacteristic = nil
         rxCharacteristic = nil
         lastSentPayload = .empty
+        pendingConnection = nil
         connectionDescription = "Scanning for remote…"
         errorMessage = nil
         scanFallbackWorkItem?.cancel()
@@ -287,7 +298,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
-            if pendingScanRequest || !isConnected {
+            if let pendingConnection {
+                self.pendingConnection = nil
+                pendingScanRequest = false
+                central.connect(pendingConnection, options: nil)
+                isBusy = true
+            } else if pendingScanRequest || !isConnected {
                 startScanning()
             }
             attemptRestoreKnownPeripheral()
@@ -310,9 +326,18 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         guard isTargetPeripheral(peripheral, advertisementData: advertisementData) else { return }
         discoveredPeripheral = peripheral
+        guard central.state == .poweredOn else {
+            pendingConnection = peripheral
+            pendingScanRequest = true
+            connectionDescription = "Waiting for Bluetooth…"
+            isBusy = true
+            return
+        }
+
         central.stopScan()
         scanFallbackWorkItem?.cancel()
         scanFallbackWorkItem = nil
+        pendingConnection = nil
         central.connect(peripheral, options: nil)
         isBusy = true
         connectionDescription = "Connecting…"
@@ -320,6 +345,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        pendingConnection = nil
         discoveredPeripheral = peripheral
         peripheral.delegate = self
         peripheral.discoverServices([serviceUUID])
@@ -327,6 +353,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        pendingConnection = nil
         errorMessage = error?.localizedDescription ?? "Failed to connect"
         connectionDescription = "Tap Connect to retry"
         isBusy = false
@@ -357,8 +384,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 } else if peripheral.state == .connecting {
                     connectionDescription = "Reconnecting…"
                     isBusy = true
+                } else if central.state == .poweredOn {
+                    central.connect(peripheral, options: nil)
+                    isBusy = true
                 } else {
-                    startScanning()
+                    pendingConnection = peripheral
+                    pendingScanRequest = true
+                    connectionDescription = "Waiting for Bluetooth…"
+                    isBusy = true
                 }
                 break
             }
