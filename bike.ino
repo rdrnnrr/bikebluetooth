@@ -157,33 +157,22 @@ class RXCB : public NimBLECharacteristicCallbacks {
   }
 };
 
-class ServerCB : public NimBLEServerCallbacks {
-public:
-  void handleConnect() {
-    songRequestPending = true;
-  }
-
-  void onConnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*connInfo*/) override {
-    handleConnect();
-  }
-
-  void onDisconnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*connInfo*/, int /*reason*/) override {
-    songRequestPending = false;
-    uartSubscribed = false;
-  }
-};
-
 class TXCB : public NimBLECharacteristicCallbacks {
 public:
   void onSubscribe(NimBLECharacteristic* /*c*/, NimBLEConnInfo& /*ci*/, uint16_t subValue) override {
     uartSubscribed = (subValue != 0);
+    if(uartSubscribed) {
+      songRequestPending = true;
+    }
   }
 };
 
 // ===== UART SERVICE =====
 void setupUartService() {
-  NimBLEServer* srv = NimBLEDevice::createServer();
-  srv->setCallbacks(new ServerCB());
+  NimBLEServer* srv = NimBLEDevice::getServer();
+  if(!srv) {
+    srv = NimBLEDevice::createServer();
+  }
   uartSvc = srv->createService(UART_SVC_UUID);
   uartRX = uartSvc->createCharacteristic(UART_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   uartTX = uartSvc->createCharacteristic(UART_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
@@ -192,8 +181,13 @@ void setupUartService() {
   uartSvc->start();
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->addServiceUUID(UART_SVC_UUID);
-  adv->setScanResponseData(NimBLEAdvertisementData());
+  if(adv) {
+    adv->addServiceUUID(UART_SVC_UUID);
+    adv->setScanResponseData(NimBLEAdvertisementData());
+    if(!adv->isAdvertising()) {
+      adv->start();
+    }
+  }
 }
 
 void sendUartNotification(const String& message) {
@@ -229,22 +223,34 @@ void setup(){
 void loop(){
   uint32_t now = millis();
 
+  bool kbConnected = bleKeyboard.isConnected();
+  if(kbConnected != lastConnected) {
+    if(kbConnected) {
+      songRequestPending = true;
+    } else {
+      songRequestPending = false;
+      uartSubscribed = false;
+      NimBLEDevice::startAdvertising();
+    }
+    lastConnected = kbConnected;
+  }
+
   // Restart if no connection after 30s
-  if (!bleKeyboard.isConnected() && (now - lastConnectAttempt > 30000)) {
+  if (!kbConnected && (now - lastConnectAttempt > 30000)) {
     Serial.println("No connection after 30s — restarting...");
     drawBottomStatic("Restarting");
     delay(1500);
     ESP.restart();
   }
 
-  if (bleKeyboard.isConnected()) lastConnectAttempt = now;
+  if (kbConnected) lastConnectAttempt = now;
 
   if(songRequestPending && uartTX && uartSubscribed) {
     sendUartNotification("REQ|SONG");
     songRequestPending = false;
   }
 
-  if(bleKeyboard.isConnected() && song.length() > 0) {
+  if(kbConnected && song.length() > 0) {
     drawBottomScroll();  // Continuous scroll update
   }
 
