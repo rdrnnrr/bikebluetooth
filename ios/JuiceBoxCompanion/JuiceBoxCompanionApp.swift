@@ -17,14 +17,9 @@ struct JuiceBoxCompanionApp: App {
                 }
         }
         .onChange(of: scenePhase) { newPhase in
-            switch newPhase {
-            case .active:
+            if newPhase == .active {
                 bluetoothManager.startScanning()
                 nowPlayingManager.beginMonitoring()
-            case .inactive, .background:
-                nowPlayingManager.stopMonitoring()
-            @unknown default:
-                break
             }
         }
     }

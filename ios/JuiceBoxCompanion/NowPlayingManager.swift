@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import MediaPlayer
+import UIKit
 
 final class NowPlayingManager: ObservableObject {
     struct Song: Equatable {
@@ -12,6 +13,7 @@ final class NowPlayingManager: ObservableObject {
     }
 
     @Published private(set) var currentSong: Song = .empty
+    @Published private(set) var authorizationError: String?
 
     private var cancellables = Set<AnyCancellable>()
     private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
@@ -64,19 +66,23 @@ final class NowPlayingManager: ObservableObject {
     private func handleAuthorization(status: MPMediaLibraryAuthorizationStatus) {
         switch status {
         case .authorized:
+            authorizationError = nil
             startPlaybackNotificationsIfNeeded()
         case .notDetermined:
+            authorizationError = nil
             MPMediaLibrary.requestAuthorization { [weak self] newStatus in
                 DispatchQueue.main.async {
                     self?.handleAuthorization(status: newStatus)
                 }
             }
         case .restricted, .denied:
+            authorizationError = "Enable Media & Apple Music access in Settings to share playback."
             stopMonitoring()
             DispatchQueue.main.async {
                 self.currentSong = .empty
             }
         @unknown default:
+            authorizationError = "Playback permissions are unavailable."
             stopMonitoring()
         }
     }
@@ -95,5 +101,11 @@ final class NowPlayingManager: ObservableObject {
             .store(in: &cancellables)
 
         updateFromNowPlayingInfo()
+    }
+
+    @MainActor
+    func openSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 }

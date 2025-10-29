@@ -61,5 +61,9 @@
     <string>JuiceBox Companion needs Bluetooth to connect to your handlebar remote.</string>
     <key>NSAppleMusicUsageDescription</key>
     <string>JuiceBox Companion mirrors the track that is currently playing on your iPhone.</string>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>bluetooth-central</string>
+    </array>
 </dict>
 </plist>

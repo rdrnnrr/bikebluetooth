@@ -78,6 +78,17 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(!bluetoothManager.canSend || nowPlayingManager.currentSong.title.isEmpty)
+
+            if let permissionMessage = nowPlayingManager.authorizationError {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(permissionMessage)
+                        .font(.footnote)
+                        .foregroundColor(.red)
+                    Button("Open Settings", action: nowPlayingManager.openSettings)
+                        .font(.footnote)
+                }
+                .padding(.top, 4)
+            }
         }
     }
 
