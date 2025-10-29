@@ -3,10 +3,6 @@ import Combine
 import MediaPlayer
 import UIKit
 
-private extension Notification.Name {
-    static let nowPlayingInfoCenterDidChange = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
-}
-
 final class NowPlayingManager: ObservableObject {
     struct Song: Equatable {
         var artist: String
@@ -16,11 +12,13 @@ final class NowPlayingManager: ObservableObject {
         static let empty = Song(artist: "", album: "", title: "")
     }
 
+    private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor playback."
+
     @Published private(set) var currentSong: Song = .empty
     @Published private(set) var authorizationError: String?
 
     private var cancellables = Set<AnyCancellable>()
-    private let nowPlayingInfoCenter = MPNowPlayingInfoCenter.default()
+    private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
     private var notificationsActive = false
     private var wantsMonitoring = false
 
@@ -42,17 +40,20 @@ final class NowPlayingManager: ObservableObject {
 
     func stopMonitoring() {
         wantsMonitoring = false
+        if notificationsActive {
+            musicPlayer.endGeneratingPlaybackNotifications()
+        }
         notificationsActive = false
         cancellables.removeAll()
     }
 
-    private func updateFromNowPlayingInfo() {
+    private func updateFromMusicPlayer() {
         guard notificationsActive else { return }
 
-        let info = nowPlayingInfoCenter.nowPlayingInfo ?? [:]
-        let title = info[MPMediaItemPropertyTitle] as? String ?? ""
-        let artist = info[MPMediaItemPropertyArtist] as? String ?? ""
-        let album = info[MPMediaItemPropertyAlbumTitle] as? String ?? ""
+        let item = musicPlayer.nowPlayingItem
+        let title = item?.title ?? ""
+        let artist = item?.artist ?? ""
+        let album = item?.albumTitle ?? ""
 
         let song = Song(artist: artist, album: album, title: title)
 
@@ -66,33 +67,72 @@ final class NowPlayingManager: ObservableObject {
     }
 
     private func startMonitoringIfNeeded() {
-        guard wantsMonitoring, !notificationsActive else {
-            updateFromNowPlayingInfo()
+        guard wantsMonitoring else {
+            return
+        }
+
+        let status = MPMediaLibrary.authorizationStatus()
+
+        switch status {
+        case .authorized:
+            break
+        case .notDetermined:
+            MPMediaLibrary.requestAuthorization { [weak self] newStatus in
+                guard let self = self else { return }
+                DispatchQueue.main.async {
+                    if newStatus == .authorized {
+                        self.authorizationError = nil
+                        self.startMonitoringIfNeeded()
+                    } else {
+                        self.authorizationError = Self.authorizationMessage
+                        self.currentSong = .empty
+                    }
+                }
+            }
+            return
+        default:
+            DispatchQueue.main.async {
+                self.authorizationError = Self.authorizationMessage
+                self.currentSong = .empty
+            }
+            return
+        }
+
+        guard !notificationsActive else {
+            updateFromMusicPlayer()
             return
         }
 
         notificationsActive = true
+        authorizationError = nil
+        musicPlayer.beginGeneratingPlaybackNotifications()
 
-        NotificationCenter.default.publisher(for: .nowPlayingInfoCenterDidChange)
+        NotificationCenter.default.publisher(for: .MPMusicPlayerControllerNowPlayingItemDidChange, object: musicPlayer)
             .sink { [weak self] _ in
-                self?.updateFromNowPlayingInfo()
+                self?.updateFromMusicPlayer()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .MPMusicPlayerControllerPlaybackStateDidChange, object: musicPlayer)
+            .sink { [weak self] _ in
+                self?.updateFromMusicPlayer()
             }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
             .sink { [weak self] _ in
-                self?.updateFromNowPlayingInfo()
+                self?.updateFromMusicPlayer()
             }
             .store(in: &cancellables)
 
         Timer.publish(every: 5, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.updateFromNowPlayingInfo()
+                self?.updateFromMusicPlayer()
             }
             .store(in: &cancellables)
 
-        updateFromNowPlayingInfo()
+        updateFromMusicPlayer()
     }
 
     @MainActor
