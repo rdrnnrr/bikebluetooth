@@ -69,7 +69,11 @@ final class NowPlayingManager: ObservableObject {
 
         notificationsActive = true
 
-        // Removed nonexistent MPNowPlayingInfoCenterNowPlayingInfoDidChange notification.
+        NotificationCenter.default.publisher(for: MPNowPlayingInfoCenter.nowPlayingInfoDidChangeNotification)
+            .sink { [weak self] _ in
+                self?.updateFromNowPlayingInfo()
+            }
+            .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
             .sink { [weak self] _ in
