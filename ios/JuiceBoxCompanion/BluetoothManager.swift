@@ -2,7 +2,7 @@ import Foundation
 import CoreBluetooth
 
 final class BluetoothManager: NSObject, ObservableObject {
-    struct SongPayload {
+    struct SongPayload: Equatable {
         var artist: String
         var album: String
         var title: String
