@@ -15,6 +15,8 @@ final class NowPlayingManager: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
+    private var notificationsActive = false
+    private var wantsMonitoring = false
 
     init(preview: Bool = false) {
         if preview {
@@ -22,17 +24,22 @@ final class NowPlayingManager: ObservableObject {
         }
     }
 
+    deinit {
+        stopMonitoring()
+    }
+
     func beginMonitoring() {
-        musicPlayer.beginGeneratingPlaybackNotifications()
+        wantsMonitoring = true
+        handleAuthorization(status: MPMediaLibrary.authorizationStatus())
+    }
 
-        NotificationCenter.default.publisher(for: .MPMusicPlayerControllerNowPlayingItemDidChange)
-            .merge(with: NotificationCenter.default.publisher(for: .MPMusicPlayerControllerPlaybackStateDidChange))
-            .sink { [weak self] _ in
-                self?.updateFromNowPlayingInfo()
-            }
-            .store(in: &cancellables)
-
-        updateFromNowPlayingInfo()
+    func stopMonitoring() {
+        wantsMonitoring = false
+        if notificationsActive {
+            musicPlayer.endGeneratingPlaybackNotifications()
+            notificationsActive = false
+        }
+        cancellables.removeAll()
     }
 
     private func updateFromNowPlayingInfo() {
@@ -52,5 +59,41 @@ final class NowPlayingManager: ObservableObject {
         DispatchQueue.main.async {
             self.currentSong = song
         }
+    }
+
+    private func handleAuthorization(status: MPMediaLibraryAuthorizationStatus) {
+        switch status {
+        case .authorized:
+            startPlaybackNotificationsIfNeeded()
+        case .notDetermined:
+            MPMediaLibrary.requestAuthorization { [weak self] newStatus in
+                DispatchQueue.main.async {
+                    self?.handleAuthorization(status: newStatus)
+                }
+            }
+        case .restricted, .denied:
+            stopMonitoring()
+            DispatchQueue.main.async {
+                self.currentSong = .empty
+            }
+        @unknown default:
+            stopMonitoring()
+        }
+    }
+
+    private func startPlaybackNotificationsIfNeeded() {
+        guard wantsMonitoring, !notificationsActive else { return }
+
+        notificationsActive = true
+        musicPlayer.beginGeneratingPlaybackNotifications()
+
+        NotificationCenter.default.publisher(for: .MPMusicPlayerControllerNowPlayingItemDidChange)
+            .merge(with: NotificationCenter.default.publisher(for: .MPMusicPlayerControllerPlaybackStateDidChange))
+            .sink { [weak self] _ in
+                self?.updateFromNowPlayingInfo()
+            }
+            .store(in: &cancellables)
+
+        updateFromNowPlayingInfo()
     }
 }

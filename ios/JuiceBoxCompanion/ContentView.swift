@@ -28,6 +28,12 @@ struct ContentView: View {
             guard bluetoothManager.isConnected else { return }
             bluetoothManager.send(song: BluetoothManager.SongPayload(from: song))
         }
+        .onChange(of: bluetoothManager.isConnected) { isConnected in
+            guard isConnected else { return }
+            let song = nowPlayingManager.currentSong
+            guard !song.title.isEmpty else { return }
+            bluetoothManager.send(song: BluetoothManager.SongPayload(from: song), force: true)
+        }
     }
 
     private var connectionSection: some View {
@@ -76,7 +82,7 @@ struct ContentView: View {
     }
 
     private func sendCurrentSong() {
-        bluetoothManager.send(song: BluetoothManager.SongPayload(from: nowPlayingManager.currentSong))
+        bluetoothManager.send(song: BluetoothManager.SongPayload(from: nowPlayingManager.currentSong), force: true)
     }
 }
 

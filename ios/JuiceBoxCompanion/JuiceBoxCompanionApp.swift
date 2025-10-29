@@ -4,6 +4,7 @@ import SwiftUI
 struct JuiceBoxCompanionApp: App {
     @StateObject private var bluetoothManager = BluetoothManager()
     @StateObject private var nowPlayingManager = NowPlayingManager()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -14,6 +15,17 @@ struct JuiceBoxCompanionApp: App {
                     bluetoothManager.startScanning()
                     nowPlayingManager.beginMonitoring()
                 }
+        }
+        .onChange(of: scenePhase) { newPhase in
+            switch newPhase {
+            case .active:
+                bluetoothManager.startScanning()
+                nowPlayingManager.beginMonitoring()
+            case .inactive, .background:
+                nowPlayingManager.stopMonitoring()
+            @unknown default:
+                break
+            }
         }
     }
 }

@@ -9,9 +9,8 @@ This SwiftUI project provides the companion app for the JuiceBox Bluetooth remot
 
 ## Getting started
 
-1. Open `ios/JuiceBoxCompanion.xcodeproj` (create a new SwiftUI App project in Xcode using these sources if the project file is missing).
+1. Open `ios/JuiceBoxCompanion/JuiceBoxCompanion.xcodeproj` in Xcode.
 2. Set the signing team and bundle identifier that suits your account.
-3. Ensure the app has the **Bluetooth** (`NSBluetoothAlwaysUsageDescription`) and **Media Library** (`NSAppleMusicUsageDescription`) usage descriptions in the target Info.
-4. Build and run on an iPhone. Simulator cannot access CoreBluetooth peripherals.
+3. Build and run on an iPhone. Simulator cannot access CoreBluetooth peripherals.
 
-Once running, start playback in Apple Music or any app that updates the system's Now Playing info. The song metadata will sync to the bike remote automatically when connected.
+Once running, start playback in Apple Music or any app that updates the system's Now Playing info. The song metadata will sync to the bike remote automatically when connected, and the remote can request a resend of the last track over the Nordic UART RX channel.

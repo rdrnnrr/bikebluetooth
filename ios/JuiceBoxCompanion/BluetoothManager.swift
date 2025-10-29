@@ -29,6 +29,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var central: CBCentralManager!
     private var discoveredPeripheral: CBPeripheral?
     private var txCharacteristic: CBCharacteristic?
+    private var rxCharacteristic: CBCharacteristic?
 
     private var lastSentPayload = SongPayload.empty
 
@@ -80,13 +81,13 @@ final class BluetoothManager: NSObject, ObservableObject {
         startScanning()
     }
 
-    func send(song: SongPayload) {
+    func send(song: SongPayload, force: Bool = false) {
         guard canSend,
               let peripheral = discoveredPeripheral,
               let txCharacteristic = txCharacteristic else { return }
 
         // Avoid spamming identical payloads
-        guard song.formatted != lastSentPayload.formatted else { return }
+        guard force || song.formatted != lastSentPayload.formatted else { return }
 
         if let data = song.formatted.data(using: .utf8) {
             peripheral.writeValue(data, for: txCharacteristic, type: .withResponse)
@@ -97,6 +98,8 @@ final class BluetoothManager: NSObject, ObservableObject {
     private func resetState() {
         isConnected = false
         txCharacteristic = nil
+        rxCharacteristic = nil
+        lastSentPayload = .empty
         connectionDescription = "Scanning for remote…"
         errorMessage = nil
     }
@@ -145,7 +148,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        isConnected = false
+        resetState()
         connectionDescription = "Disconnected"
         isBusy = false
         if let error = error {
@@ -176,12 +179,46 @@ extension BluetoothManager: CBPeripheralDelegate {
         }
         guard let characteristics = service.characteristics else { return }
         for characteristic in characteristics {
-            if characteristic.uuid == txUUID {
+            switch characteristic.uuid {
+            case txUUID:
                 txCharacteristic = characteristic
+            case rxUUID:
+                rxCharacteristic = characteristic
+                peripheral.setNotifyValue(true, for: characteristic)
+            default:
+                break
             }
         }
         isConnected = txCharacteristic != nil
         isBusy = false
         connectionDescription = isConnected ? "Connected" : "Missing UART characteristic"
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            errorMessage = error.localizedDescription
+            return
+        }
+        guard characteristic.uuid == rxUUID,
+              let data = characteristic.value,
+              let message = String(data: data, encoding: .utf8) else { return }
+
+        handleIncoming(message: message.trimmingCharacters(in: .whitespacesAndNewlines), from: peripheral)
+    }
+}
+
+private extension BluetoothManager {
+    func handleIncoming(message: String, from peripheral: CBPeripheral) {
+        switch message {
+        case "ACK":
+            // Remote acknowledged the most recent payload; nothing else to do.
+            break
+        case "REQ|SONG":
+            if lastSentPayload != .empty {
+                send(song: lastSentPayload, force: true)
+            }
+        default:
+            print("Received UART message: \(message)")
+        }
     }
 }
