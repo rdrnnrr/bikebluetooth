@@ -197,7 +197,9 @@ final class NowPlayingManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
-            let infoSong = self.songFromNowPlayingInfo(self.activeNowPlayingInfo())
+            let activeInfo = self.activeNowPlayingInfo()
+            print("DEBUG: nowPlayingInfo dictionary: \(activeInfo ?? [:])")
+            let infoSong = self.songFromNowPlayingInfo(activeInfo)
             let playerSong = self.musicPlayerMonitoringActive ? self.songFromMediaItem(self.musicPlayer.nowPlayingItem) : nil
             let song = infoSong ?? playerSong ?? .empty
 
