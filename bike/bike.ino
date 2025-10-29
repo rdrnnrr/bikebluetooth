@@ -30,6 +30,9 @@ NimBLEService* uartSvc = nullptr;
 NimBLECharacteristic* uartRX = nullptr;
 NimBLECharacteristic* uartTX = nullptr;
 String uartBuffer = "";
+String pendingLegacySongCommand = "";
+uint32_t pendingLegacySongSince = 0;
+const uint32_t LEGACY_SONG_GRACE_MS = 250;
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -220,7 +223,9 @@ class RXCB : public NimBLECharacteristicCallbacks {
     std::string v = c->getValue();
     if(v.empty()) return;
 
-    size_t priorLength = uartBuffer.length();
+    pendingLegacySongSince = 0;
+    pendingLegacySongCommand = "";
+
     uartBuffer += String(v.c_str());
     if(uartBuffer.length() > 256) {
       uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
@@ -231,12 +236,14 @@ class RXCB : public NimBLECharacteristicCallbacks {
       String message = uartBuffer.substring(0, newlineIndex);
       uartBuffer.remove(0, newlineIndex + 1);
       message.trim();
+      pendingLegacySongSince = 0;
+      pendingLegacySongCommand = "";
       handleUartMessage(message);
       newlineIndex = uartBuffer.indexOf('\n');
     }
 
     // Support legacy single-packet commands that omit a newline terminator.
-    if(uartBuffer.length() > 0 && priorLength == 0) {
+    if(uartBuffer.length() > 0) {
       String pending = uartBuffer;
       pending.trim();
 
@@ -245,9 +252,11 @@ class RXCB : public NimBLECharacteristicCallbacks {
         int p2 = pending.indexOf('|', p1 + 1);
         if(p2 > 0) {
           int p3 = pending.indexOf('|', p2 + 1);
-          if(p3 > 0 && pending.indexOf('\n') < 0 && pending.indexOf('\r') < 0) {
-            handleUartMessage(pending);
-            uartBuffer = "";
+          if(p3 > 0 && pending.indexOf('\n') < 0 && pending.startsWith("SONG|")) {
+            if(pendingLegacySongSince == 0) {
+              pendingLegacySongSince = millis();
+              pendingLegacySongCommand = pending;
+            }
           }
         }
       }
@@ -310,6 +319,19 @@ void setup(){
 // ===== LOOP =====
 void loop(){
   uint32_t now = millis();
+
+  if(pendingLegacySongSince > 0) {
+    if(now - pendingLegacySongSince >= LEGACY_SONG_GRACE_MS) {
+      String pending = uartBuffer;
+      pending.trim();
+      if(pending.length() > 0 && pending == pendingLegacySongCommand) {
+        handleUartMessage(pending);
+        uartBuffer = "";
+      }
+      pendingLegacySongSince = 0;
+      pendingLegacySongCommand = "";
+    }
+  }
 
   bool kbConnected = bleKeyboard.isConnected();
   if(kbConnected != lastConnected) {
