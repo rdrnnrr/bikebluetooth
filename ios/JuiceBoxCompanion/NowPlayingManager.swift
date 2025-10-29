@@ -14,6 +14,29 @@ final class NowPlayingManager: ObservableObject {
 
     private static let authorizationMessage = "Enable Media & Apple Music access in Settings to monitor Apple Music playback."
     private static let nowPlayingInfoCenterDidChangeNotification = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
+    private static let nowPlayingInfoTitleKeys: [String] = [
+        MPMediaItemPropertyTitle,
+        "kMRMediaRemoteNowPlayingInfoTitle",
+        "title",
+        "song",
+        "trackName"
+    ]
+    private static let nowPlayingInfoArtistKeys: [String] = [
+        MPMediaItemPropertyArtist,
+        MPMediaItemPropertyAlbumArtist,
+        "kMRMediaRemoteNowPlayingInfoArtist",
+        "kMRMediaRemoteNowPlayingInfoAlbumArtist",
+        "artist",
+        "subtitle",
+        "performer",
+        "kMRMediaRemoteNowPlayingInfoPerformer"
+    ]
+    private static let nowPlayingInfoAlbumKeys: [String] = [
+        MPMediaItemPropertyAlbumTitle,
+        "kMRMediaRemoteNowPlayingInfoAlbum",
+        "album",
+        "collection"
+    ]
 
     @Published private(set) var currentSong: Song = .empty
     @Published private(set) var authorizationError: String?
@@ -158,9 +181,9 @@ final class NowPlayingManager: ObservableObject {
     private func songFromNowPlayingInfo(_ info: [String: Any]?) -> Song? {
         guard let info = info else { return nil }
 
-        let title = (info[MPMediaItemPropertyTitle] as? String)?.trimmed ?? ""
-        let artist = ((info[MPMediaItemPropertyArtist] as? String) ?? (info[MPMediaItemPropertyAlbumArtist] as? String))?.trimmed ?? ""
-        let album = (info[MPMediaItemPropertyAlbumTitle] as? String)?.trimmed ?? ""
+        let title = normalizedString(for: Self.nowPlayingInfoTitleKeys, in: info)
+        let artist = normalizedString(for: Self.nowPlayingInfoArtistKeys, in: info)
+        let album = normalizedString(for: Self.nowPlayingInfoAlbumKeys, in: info)
 
         guard [title, artist, album].contains(where: { !$0.isEmpty }) else { return nil }
 
@@ -189,5 +212,28 @@ final class NowPlayingManager: ObservableObject {
 private extension String {
     var trimmed: String {
         trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private extension NowPlayingManager {
+    func normalizedString(for keys: [String], in info: [String: Any]) -> String {
+        for key in keys {
+            if let value = info[key] as? String {
+                let trimmed = value.trimmed
+                if !trimmed.isEmpty { return trimmed }
+            }
+
+            if let value = info[key] as? NSString {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+
+            if let value = info[key] as? NSAttributedString {
+                let trimmed = value.string.trimmed
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+
+        return ""
     }
 }
