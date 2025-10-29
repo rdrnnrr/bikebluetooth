@@ -52,6 +52,7 @@ uint32_t lastConnectAttempt = 0;
 uint32_t lastScroll = 0;
 int scrollOffset = 0;
 bool songRequestPending = false;
+bool uartSubscribed = false;
 
 // Forward declarations
 void sendUartNotification(const String& message);
@@ -162,14 +163,20 @@ public:
     songRequestPending = true;
   }
 
-  void onConnect(NimBLEServer* /*srv*/) override { handleConnect(); }
-
-  void onConnect(NimBLEServer* /*srv*/, ble_gap_conn_desc* /*desc*/) override {
+  void onConnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*connInfo*/) override {
     handleConnect();
   }
 
-  void onDisconnect(NimBLEServer* /*srv*/) override {
+  void onDisconnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*connInfo*/, int /*reason*/) override {
     songRequestPending = false;
+    uartSubscribed = false;
+  }
+};
+
+class TXCB : public NimBLECharacteristicCallbacks {
+public:
+  void onSubscribe(NimBLECharacteristic* /*c*/, NimBLEConnInfo& /*ci*/, uint16_t subValue) override {
+    uartSubscribed = (subValue != 0);
   }
 };
 
@@ -180,6 +187,7 @@ void setupUartService() {
   uartSvc = srv->createService(UART_SVC_UUID);
   uartRX = uartSvc->createCharacteristic(UART_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   uartTX = uartSvc->createCharacteristic(UART_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
+  uartTX->setCallbacks(new TXCB());
   uartRX->setCallbacks(new RXCB());
   uartSvc->start();
 
@@ -189,8 +197,7 @@ void setupUartService() {
 }
 
 void sendUartNotification(const String& message) {
-  if(!uartTX) return;
-  if(uartTX->getSubscribedCount() == 0) return;
+  if(!uartTX || !uartSubscribed) return;
 
   std::string payload(message.c_str());
   uartTX->setValue(payload);
@@ -232,7 +239,7 @@ void loop(){
 
   if (bleKeyboard.isConnected()) lastConnectAttempt = now;
 
-  if(songRequestPending && uartTX && uartTX->getSubscribedCount() > 0) {
+  if(songRequestPending && uartTX && uartSubscribed) {
     sendUartNotification("REQ|SONG");
     songRequestPending = false;
   }
