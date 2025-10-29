@@ -3,6 +3,10 @@ import Combine
 import MediaPlayer
 import UIKit
 
+private extension Notification.Name {
+    static let MPNowPlayingInfoCenterNowPlayingInfoDidChange = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
+}
+
 final class NowPlayingManager: ObservableObject {
     struct Song: Equatable {
         var artist: String
@@ -54,7 +58,7 @@ final class NowPlayingManager: ObservableObject {
         if !notificationsActive {
             notificationsActive = true
 
-            NotificationCenter.default.publisher(for: .mpNowPlayingInfoCenterDidChange, object: MPNowPlayingInfoCenter.default())
+            NotificationCenter.default.publisher(for: MPNowPlayingInfoCenter.nowPlayingInfoDidChangeNotification, object: MPNowPlayingInfoCenter.default())
                 .sink { [weak self] _ in
                     self?.updateNowPlayingMetadata()
                 }
@@ -186,10 +190,4 @@ private extension String {
     var trimmed: String {
         trimmingCharacters(in: .whitespacesAndNewlines)
     }
-}
-
-private extension Notification.Name {
-    /// Compatibility wrapper for MPNowPlayingInfoCenter now playing change notification.
-    /// Some SDK versions don't vend the strongly typed constant, so we define it manually.
-    static let mpNowPlayingInfoCenterDidChange = Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
 }
