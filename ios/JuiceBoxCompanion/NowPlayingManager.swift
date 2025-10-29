@@ -80,7 +80,7 @@ final class NowPlayingManager: ObservableObject {
 
             NotificationCenter.default.publisher(
                 for: Self.nowPlayingInfoCenterDidChangeNotification,
-                object: MPNowPlayingInfoCenter.default()
+                object: nil
             )
                 .sink { [weak self] _ in
                     self?.updateNowPlayingMetadata()
@@ -181,9 +181,9 @@ final class NowPlayingManager: ObservableObject {
     private func songFromNowPlayingInfo(_ info: [String: Any]?) -> Song? {
         guard let info = info else { return nil }
 
-        let title = normalizedString(for: Self.nowPlayingInfoTitleKeys, in: info)
-        let artist = normalizedString(for: Self.nowPlayingInfoArtistKeys, in: info)
-        let album = normalizedString(for: Self.nowPlayingInfoAlbumKeys, in: info)
+        let title = normalizedString(for: Self.nowPlayingInfoTitleKeys, hints: Self.nowPlayingInfoTitleHints, in: info)
+        let artist = normalizedString(for: Self.nowPlayingInfoArtistKeys, hints: Self.nowPlayingInfoArtistHints, in: info)
+        let album = normalizedString(for: Self.nowPlayingInfoAlbumKeys, hints: Self.nowPlayingInfoAlbumHints, in: info)
 
         guard [title, artist, album].contains(where: { !$0.isEmpty }) else { return nil }
 
@@ -216,24 +216,73 @@ private extension String {
 }
 
 private extension NowPlayingManager {
-    func normalizedString(for keys: [String], in info: [String: Any]) -> String {
+    static let nowPlayingInfoTitleHints = ["title", "song", "track", "name"]
+    static let nowPlayingInfoArtistHints = ["artist", "performer", "subtitle", "channel", "singer"]
+    static let nowPlayingInfoAlbumHints = ["album", "collection", "playlist"]
+
+    func normalizedString(for keys: [String], hints: [String], in info: [String: Any]) -> String {
         for key in keys {
-            if let value = info[key] as? String {
-                let trimmed = value.trimmed
-                if !trimmed.isEmpty { return trimmed }
+            if let normalized = normalizedValue(info[key]) {
+                return normalized
             }
+        }
 
-            if let value = info[key] as? NSString {
-                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { return trimmed }
-            }
-
-            if let value = info[key] as? NSAttributedString {
-                let trimmed = value.string.trimmed
-                if !trimmed.isEmpty { return trimmed }
+        for (key, value) in info {
+            let lowerKey = key.lowercased()
+            if hints.contains(where: { lowerKey.contains($0) }), let normalized = normalizedValue(value) {
+                return normalized
             }
         }
 
         return ""
+    }
+
+    func normalizedValue(_ value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let string = value as? String {
+            let trimmed = string.trimmed
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        if let string = value as? NSString {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        if let string = value as? NSAttributedString {
+            let trimmed = string.string.trimmed
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        if let number = value as? NSNumber {
+            let trimmed = number.stringValue.trimmed
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        if let dictionary = value as? [String: Any] {
+            for nestedValue in dictionary.values {
+                if let normalized = normalizedValue(nestedValue) {
+                    return normalized
+                }
+            }
+            return nil
+        }
+
+        if let array = value as? [Any] {
+            for element in array {
+                if let normalized = normalizedValue(element) {
+                    return normalized
+                }
+            }
+            return nil
+        }
+
+        if let describable = value as? CustomStringConvertible {
+            let trimmed = describable.description.trimmed
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        return nil
     }
 }
