@@ -183,7 +183,6 @@ void setupUartService() {
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   if(adv) {
     adv->addServiceUUID(UART_SVC_UUID);
-    adv->setScanResponse(true);
     if(!adv->isAdvertising()) {
       adv->start();
     }
