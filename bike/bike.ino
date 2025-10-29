@@ -52,6 +52,7 @@ uint32_t lastConnectAttempt = 0;
 uint32_t lastScroll = 0;
 int scrollOffset = 0;
 bool songRequestPending = false;
+bool uartSubscribed = false;
 
 // Forward declarations
 void sendUartNotification(const String& message);
@@ -156,41 +157,40 @@ class RXCB : public NimBLECharacteristicCallbacks {
   }
 };
 
-class ServerCB : public NimBLEServerCallbacks {
+class TXCB : public NimBLECharacteristicCallbacks {
 public:
-  void handleConnect() {
-    songRequestPending = true;
-  }
-
-  void onConnect(NimBLEServer* /*srv*/) override { handleConnect(); }
-
-  void onConnect(NimBLEServer* /*srv*/, ble_gap_conn_desc* /*desc*/) override {
-    handleConnect();
-  }
-
-  void onDisconnect(NimBLEServer* /*srv*/) override {
-    songRequestPending = false;
+  void onSubscribe(NimBLECharacteristic* /*c*/, NimBLEConnInfo& /*ci*/, uint16_t subValue) override {
+    uartSubscribed = (subValue != 0);
+    if(uartSubscribed) {
+      songRequestPending = true;
+    }
   }
 };
 
 // ===== UART SERVICE =====
 void setupUartService() {
-  NimBLEServer* srv = NimBLEDevice::createServer();
-  srv->setCallbacks(new ServerCB());
+  NimBLEServer* srv = NimBLEDevice::getServer();
+  if(!srv) {
+    srv = NimBLEDevice::createServer();
+  }
   uartSvc = srv->createService(UART_SVC_UUID);
   uartRX = uartSvc->createCharacteristic(UART_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   uartTX = uartSvc->createCharacteristic(UART_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
+  uartTX->setCallbacks(new TXCB());
   uartRX->setCallbacks(new RXCB());
   uartSvc->start();
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->addServiceUUID(UART_SVC_UUID);
-  adv->setScanResponseData(NimBLEAdvertisementData());
+  if(adv) {
+    adv->addServiceUUID(UART_SVC_UUID);
+    if(!adv->isAdvertising()) {
+      adv->start();
+    }
+  }
 }
 
 void sendUartNotification(const String& message) {
-  if(!uartTX) return;
-  if(uartTX->getSubscribedCount() == 0) return;
+  if(!uartTX || !uartSubscribed) return;
 
   std::string payload(message.c_str());
   uartTX->setValue(payload);
@@ -222,22 +222,34 @@ void setup(){
 void loop(){
   uint32_t now = millis();
 
+  bool kbConnected = bleKeyboard.isConnected();
+  if(kbConnected != lastConnected) {
+    if(kbConnected) {
+      songRequestPending = true;
+    } else {
+      songRequestPending = false;
+      uartSubscribed = false;
+      NimBLEDevice::startAdvertising();
+    }
+    lastConnected = kbConnected;
+  }
+
   // Restart if no connection after 30s
-  if (!bleKeyboard.isConnected() && (now - lastConnectAttempt > 30000)) {
+  if (!kbConnected && (now - lastConnectAttempt > 30000)) {
     Serial.println("No connection after 30s — restarting...");
     drawBottomStatic("Restarting");
     delay(1500);
     ESP.restart();
   }
 
-  if (bleKeyboard.isConnected()) lastConnectAttempt = now;
+  if (kbConnected) lastConnectAttempt = now;
 
-  if(songRequestPending && uartTX && uartTX->getSubscribedCount() > 0) {
+  if(songRequestPending && uartTX && uartSubscribed) {
     sendUartNotification("REQ|SONG");
     songRequestPending = false;
   }
 
-  if(bleKeyboard.isConnected() && song.length() > 0) {
+  if(kbConnected && song.length() > 0) {
     drawBottomScroll();  // Continuous scroll update
   }
 
