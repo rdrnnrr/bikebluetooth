@@ -34,6 +34,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var rxCharacteristic: CBCharacteristic?
 
     private var lastSentPayload = SongPayload.empty
+    private var lastSeenPeripheralNames: [UUID: [String]] = [:]
     private var pendingScanRequest = false
     private var scanFallbackWorkItem: DispatchWorkItem?
 
@@ -221,6 +222,8 @@ final class BluetoothManager: NSObject, ObservableObject {
     }
 
     private func isTargetPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any] = [:]) -> Bool {
+        updateLastSeenNames(for: peripheral, advertisementData: advertisementData)
+
         if let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID],
            advertisedServices.contains(serviceUUID) {
             return true
@@ -236,14 +239,36 @@ final class BluetoothManager: NSObject, ObservableObject {
             return true
         }
 
+        return hasExpectedName(for: peripheral)
+    }
+
+    private func updateLastSeenNames(for peripheral: CBPeripheral, advertisementData: [String: Any]) {
         var candidates: [String] = []
 
-        if let name = peripheral.name?.lowercased() {
+        if let name = peripheral.name?.lowercased(), !name.isEmpty {
             candidates.append(name)
         }
 
-        if let advertisedName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)?.lowercased() {
+        if let advertisedName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)?.lowercased(),
+           !advertisedName.isEmpty {
             candidates.append(advertisedName)
+        }
+
+        if !candidates.isEmpty {
+            lastSeenPeripheralNames[peripheral.identifier] = candidates
+        }
+    }
+
+    private func hasExpectedName(for peripheral: CBPeripheral) -> Bool {
+        if let storedIdentifier = UserDefaults.standard.string(forKey: knownPeripheralKey),
+           peripheral.identifier.uuidString == storedIdentifier {
+            return true
+        }
+
+        var candidates = lastSeenPeripheralNames[peripheral.identifier] ?? []
+
+        if let currentName = peripheral.name?.lowercased(), !currentName.isEmpty {
+            candidates.append(currentName)
         }
 
         return candidates.contains { $0.contains(deviceNameKeyword) }
@@ -291,7 +316,6 @@ extension BluetoothManager: CBCentralManagerDelegate {
         peripheral.delegate = self
         peripheral.discoverServices([serviceUUID])
         connectionDescription = "Discovering services…"
-        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralKey)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -372,9 +396,14 @@ extension BluetoothManager: CBPeripheralDelegate {
                 break
             }
         }
+        let hadConnection = isConnected
         isConnected = txCharacteristic != nil && rxCharacteristic != nil
         isBusy = false
         connectionDescription = isConnected ? "Connected" : "Missing UART characteristic"
+
+        if isConnected && !hadConnection && shouldPersistPeripheral(peripheral) {
+            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralKey)
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -400,8 +429,22 @@ private extension BluetoothManager {
             if lastSentPayload != .empty {
                 send(song: lastSentPayload, force: true)
             }
+            if shouldPersistPeripheral(peripheral) {
+                UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralKey)
+            }
         default:
             print("Received UART message: \(message)")
         }
+    }
+}
+
+private extension BluetoothManager {
+    func shouldPersistPeripheral(_ peripheral: CBPeripheral) -> Bool {
+        if let storedIdentifier = UserDefaults.standard.string(forKey: knownPeripheralKey),
+           storedIdentifier == peripheral.identifier.uuidString {
+            return true
+        }
+
+        return hasExpectedName(for: peripheral)
     }
 }
