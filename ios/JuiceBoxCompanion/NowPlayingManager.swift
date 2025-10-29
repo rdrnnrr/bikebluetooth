@@ -194,20 +194,23 @@ final class NowPlayingManager: ObservableObject {
     private func updateNowPlayingMetadata() {
         guard notificationsActive else { return }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-
-            let infoSong = self.songFromNowPlayingInfo(self.activeNowPlayingInfo())
-            let playerSong = self.musicPlayerMonitoringActive ? self.songFromMediaItem(self.musicPlayer.nowPlayingItem) : nil
-            let song = infoSong ?? playerSong ?? .empty
-
-            DispatchQueue.main.async {
-                if song != .empty {
-                    self.authorizationError = nil
-                }
-                self.currentSong = song
-            }
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshNowPlayingMetadataOnMainThread()
         }
+    }
+
+    private func refreshNowPlayingMetadataOnMainThread() {
+        guard notificationsActive else { return }
+
+        let infoSong = songFromNowPlayingInfo(activeNowPlayingInfo())
+        let playerSong = musicPlayerMonitoringActive ? songFromMediaItem(musicPlayer.nowPlayingItem) : nil
+        let song = infoSong ?? playerSong ?? .empty
+
+        if song != .empty {
+            authorizationError = nil
+        }
+
+        currentSong = song
     }
 
     private func songFromNowPlayingInfo(_ info: [String: Any]?) -> Song? {
