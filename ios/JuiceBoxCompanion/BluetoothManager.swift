@@ -19,7 +19,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     @Published private(set) var connectionDescription = "Searching for JuiceBox Remote…"
     @Published private(set) var errorMessage: String?
 
-    var canSend: Bool { isConnected && txCharacteristic != nil }
+    var canSend: Bool { isConnected && rxCharacteristic != nil }
 
     private let serviceUUID = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
     private let rxUUID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -102,7 +102,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     func send(song: SongPayload, force: Bool = false) {
         guard canSend,
               let peripheral = discoveredPeripheral,
-              let txCharacteristic = txCharacteristic else { return }
+              let rxCharacteristic = rxCharacteristic else { return }
 
         // Avoid spamming identical payloads
         guard force || song.formatted != lastSentPayload.formatted else { return }
@@ -114,7 +114,7 @@ final class BluetoothManager: NSObject, ObservableObject {
         while offset < data.count {
             let chunkSize = min(maxLength, data.count - offset)
             let chunk = data.subdata(in: offset..<(offset + chunkSize))
-            peripheral.writeValue(chunk, for: txCharacteristic, type: .withResponse)
+            peripheral.writeValue(chunk, for: rxCharacteristic, type: .withResponse)
             offset += chunkSize
         }
 
@@ -261,14 +261,14 @@ extension BluetoothManager: CBPeripheralDelegate {
             switch characteristic.uuid {
             case txUUID:
                 txCharacteristic = characteristic
+                peripheral.setNotifyValue(true, for: characteristic)
             case rxUUID:
                 rxCharacteristic = characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
             default:
                 break
             }
         }
-        isConnected = txCharacteristic != nil
+        isConnected = txCharacteristic != nil && rxCharacteristic != nil
         isBusy = false
         connectionDescription = isConnected ? "Connected" : "Missing UART characteristic"
     }
@@ -278,7 +278,7 @@ extension BluetoothManager: CBPeripheralDelegate {
             errorMessage = error.localizedDescription
             return
         }
-        guard characteristic.uuid == rxUUID,
+        guard characteristic.uuid == txUUID,
               let data = characteristic.value,
               let message = String(data: data, encoding: .utf8) else { return }
 
