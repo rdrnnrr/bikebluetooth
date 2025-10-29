@@ -29,6 +29,7 @@ static const char* UART_TX_UUID  = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 NimBLEService* uartSvc = nullptr;
 NimBLECharacteristic* uartRX = nullptr;
 NimBLECharacteristic* uartTX = nullptr;
+String uartBuffer = "";
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -126,25 +127,41 @@ void showBoot(){ oledTop.clearDisplay(); oledBot.clearDisplay(); drawBottomStati
 void showReady(){ drawTopInfo(); drawBottomStatic("Ready"); }
 
 // ===== UART CALLBACK =====
+void handleUartMessage(const String& s) {
+  if(!s.length()) return;
+
+  int p1 = s.indexOf('|');
+  if(p1 < 0) return;
+  String cmd = s.substring(0, p1);
+
+  if(cmd == "SONG") {
+    int p2 = s.indexOf('|', p1+1);
+    int p3 = s.indexOf('|', p2+1);
+    if(p2 < 0 || p3 < 0) return;
+    artist = s.substring(p1+1, p2);
+    album  = s.substring(p2+1, p3);
+    song   = s.substring(p3+1);
+    drawTopInfo();
+    scrollOffset = 0;
+  }
+}
+
 class RXCB : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*ci*/) override {
     std::string v = c->getValue();
     if(v.empty()) return;
-    String s = String(v.c_str());
+    uartBuffer += String(v.c_str());
+    if(uartBuffer.length() > 256) {
+      uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
+    }
 
-    // Expected format: SONG|Artist|Album|Title
-    int p1 = s.indexOf('|');
-    if(p1 < 0) return;
-    String cmd = s.substring(0, p1);
-
-    if(cmd == "SONG") {
-      int p2 = s.indexOf('|', p1+1);
-      int p3 = s.indexOf('|', p2+1);
-      artist = s.substring(p1+1, p2);
-      album  = s.substring(p2+1, p3);
-      song   = s.substring(p3+1);
-      drawTopInfo();
-      scrollOffset = 0;
+    int newlineIndex = uartBuffer.indexOf('\n');
+    while(newlineIndex >= 0) {
+      String message = uartBuffer.substring(0, newlineIndex);
+      uartBuffer.remove(0, newlineIndex + 1);
+      message.trim();
+      handleUartMessage(message);
+      newlineIndex = uartBuffer.indexOf('\n');
     }
   }
 };
