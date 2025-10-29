@@ -21,7 +21,7 @@ final class NowPlayingManager: ObservableObject {
             Notification.Name("MPNowPlayingInfoCenterNowPlayingInfoDidChange")
         ]
 
-        if let compatibilityName = Self.typedNowPlayingInfoCenterNotification() {
+        if let compatibilityName = NowPlayingManager.typedNowPlayingInfoCenterNotification() {
             names.insert(compatibilityName, at: 0)
         }
 
