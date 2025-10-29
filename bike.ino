@@ -29,7 +29,6 @@ static const char* UART_TX_UUID  = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 NimBLEService* uartSvc = nullptr;
 NimBLECharacteristic* uartRX = nullptr;
 NimBLECharacteristic* uartTX = nullptr;
-String uartBuffer = "";
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -52,6 +51,10 @@ String song = "";
 uint32_t lastConnectAttempt = 0;
 uint32_t lastScroll = 0;
 int scrollOffset = 0;
+bool songRequestPending = false;
+
+// Forward declarations
+void sendUartNotification(const String& message);
 
 // ===== HELPERS =====
 inline bool inDZ(float v){ return fabs(v) < DEADZONE; }
@@ -127,48 +130,53 @@ void showBoot(){ oledTop.clearDisplay(); oledBot.clearDisplay(); drawBottomStati
 void showReady(){ drawTopInfo(); drawBottomStatic("Ready"); }
 
 // ===== UART CALLBACK =====
-void handleUartMessage(const String& s) {
-  if(!s.length()) return;
-
-  int p1 = s.indexOf('|');
-  if(p1 < 0) return;
-  String cmd = s.substring(0, p1);
-
-  if(cmd == "SONG") {
-    int p2 = s.indexOf('|', p1+1);
-    int p3 = s.indexOf('|', p2+1);
-    if(p2 < 0 || p3 < 0) return;
-    artist = s.substring(p1+1, p2);
-    album  = s.substring(p2+1, p3);
-    song   = s.substring(p3+1);
-    drawTopInfo();
-    scrollOffset = 0;
-  }
-}
-
 class RXCB : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*ci*/) override {
     std::string v = c->getValue();
     if(v.empty()) return;
-    uartBuffer += String(v.c_str());
-    if(uartBuffer.length() > 256) {
-      uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
-    }
+    String s = String(v.c_str());
 
-    int newlineIndex = uartBuffer.indexOf('\n');
-    while(newlineIndex >= 0) {
-      String message = uartBuffer.substring(0, newlineIndex);
-      uartBuffer.remove(0, newlineIndex + 1);
-      message.trim();
-      handleUartMessage(message);
-      newlineIndex = uartBuffer.indexOf('\n');
+    // Expected format: SONG|Artist|Album|Title
+    int p1 = s.indexOf('|');
+    if(p1 < 0) return;
+    String cmd = s.substring(0, p1);
+
+    if(cmd == "SONG") {
+      int p2 = s.indexOf('|', p1+1);
+      int p3 = s.indexOf('|', p2+1);
+      if(p2 < 0 || p3 < 0) return;
+
+      artist = s.substring(p1+1, p2);
+      album  = s.substring(p2+1, p3);
+      song   = s.substring(p3+1);
+      drawTopInfo();
+      scrollOffset = 0;
+      sendUartNotification("ACK");
     }
+  }
+};
+
+class ServerCB : public NimBLEServerCallbacks {
+public:
+  void handleConnect() {
+    songRequestPending = true;
+  }
+
+  void onConnect(NimBLEServer* /*srv*/) override { handleConnect(); }
+
+  void onConnect(NimBLEServer* /*srv*/, ble_gap_conn_desc* /*desc*/) override {
+    handleConnect();
+  }
+
+  void onDisconnect(NimBLEServer* /*srv*/) override {
+    songRequestPending = false;
   }
 };
 
 // ===== UART SERVICE =====
 void setupUartService() {
   NimBLEServer* srv = NimBLEDevice::createServer();
+  srv->setCallbacks(new ServerCB());
   uartSvc = srv->createService(UART_SVC_UUID);
   uartRX = uartSvc->createCharacteristic(UART_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   uartTX = uartSvc->createCharacteristic(UART_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
@@ -178,6 +186,15 @@ void setupUartService() {
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(UART_SVC_UUID);
   adv->setScanResponseData(NimBLEAdvertisementData());
+}
+
+void sendUartNotification(const String& message) {
+  if(!uartTX) return;
+  if(uartTX->getSubscribedCount() == 0) return;
+
+  std::string payload(message.c_str());
+  uartTX->setValue(payload);
+  uartTX->notify();
 }
 
 // ===== SETUP =====
@@ -214,6 +231,11 @@ void loop(){
   }
 
   if (bleKeyboard.isConnected()) lastConnectAttempt = now;
+
+  if(songRequestPending && uartTX && uartTX->getSubscribedCount() > 0) {
+    sendUartNotification("REQ|SONG");
+    songRequestPending = false;
+  }
 
   if(bleKeyboard.isConnected() && song.length() > 0) {
     drawBottomScroll();  // Continuous scroll update
