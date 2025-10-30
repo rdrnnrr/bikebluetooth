@@ -24,7 +24,16 @@ public enum NowPlayingSharedStore {
         UserDefaults(suiteName: suiteName)
     }
 
+    private static var isAppGroupAvailable: Bool {
+        defaults != nil
+    }
+
     public static func save(song: NowPlayingSharedSong?) {
+        guard isAppGroupAvailable else {
+            // Silently no-op if the app group container is not available (e.g., Simulator or missing entitlement).
+            return
+        }
+
         guard let defaults else { return }
 
         if let song, let data = try? JSONEncoder().encode(song) {
@@ -35,11 +44,12 @@ public enum NowPlayingSharedStore {
     }
 
     public static func loadSong() -> NowPlayingSharedSong? {
-        guard
-            let defaults,
-            let data = defaults.data(forKey: songKey),
-            let song = try? JSONDecoder().decode(NowPlayingSharedSong.self, from: data)
-        else {
+        guard isAppGroupAvailable, let defaults else {
+            return nil
+        }
+
+        guard let data = defaults.data(forKey: songKey),
+              let song = try? JSONDecoder().decode(NowPlayingSharedSong.self, from: data) else {
             return nil
         }
 
