@@ -47,7 +47,7 @@ extension JuiceBoxCompanionShortcuts: AppShortcutsProvider {
     static var appShortcutsTitle: LocalizedStringResource { titleResource }
 
     @AppShortcutsBuilder
-    static var appShortcuts: AppShortcut {
+    static var appShortcuts: [AppShortcut] {
         nowPlayingShortcut
     }
 }
