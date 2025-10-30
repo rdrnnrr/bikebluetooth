@@ -8,13 +8,13 @@ struct JuiceBoxCompanionIntentsExtension: AppIntentsExtension { }
 struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
     static var shortcutTileColor: ShortcutTileColor { .blue }
 
-    static var appShortcuts: [AppShortcut] {
+    static var appShortcuts: AppShortcut {
         AppShortcut(
             intent: GetNowPlayingSongIntent(),
             phrases: [
-                "Get JuiceBox Companion song",
-                "What is JuiceBox Companion playing",
-                "Get current JuiceBox song"
+                "Get ${applicationName} song",
+                "What is ${applicationName} playing",
+                "Get current ${applicationName} song"
             ],
             shortTitle: "Current Song",
             systemImageName: "music.note"
