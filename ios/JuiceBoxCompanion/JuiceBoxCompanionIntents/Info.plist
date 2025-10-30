@@ -12,7 +12,7 @@
             </array>
         </dict>
         <key>NSExtensionPointIdentifier</key>
-        <string>com.apple.intents</string>
+        <string>com.apple.appintents-service</string>
         <key>NSExtensionPrincipalClass</key>
         <string>$(PRODUCT_MODULE_NAME).JuiceBoxCompanionIntentsExtension</string>
     </dict>
