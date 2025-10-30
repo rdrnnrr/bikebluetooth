@@ -6,42 +6,137 @@ struct GetNowPlayingSongIntent: AppIntent {
     static var title: LocalizedStringResource = "Get Now Playing Song"
     static var description = IntentDescription("Returns the most recent song captured by JuiceBox Companion for use in Shortcuts.")
 
-    func perform() async throws -> some IntentResult & ReturnsValue<NowPlayingSongIntentResponse> {
-        let song = NowPlayingSharedStore.loadSong() ?? .empty
-        let response = NowPlayingSongIntentResponse(from: song)
+    func perform() async throws -> some IntentResult & ReturnsValue<NowPlayingSongEntity> {
+        let sharedSong = NowPlayingSharedStore.loadSong() ?? .empty
+        let entity = NowPlayingSongEntity(song: sharedSong)
 
-        if song == .empty {
-            return .result(value: response, dialog: IntentDialog("No song information is currently available."))
+        if entity.isEmpty {
+            return .result(
+                value: entity,
+                dialog: IntentDialog(stringLiteral: "No song information is currently available.")
+            )
         }
 
         let dialogText: String
-        if song.artist.isEmpty {
-            dialogText = "Now playing \(song.title)."
-        } else if song.title.isEmpty {
-            dialogText = "Now playing music by \(song.artist)."
+        if entity.artist.isEmpty {
+            dialogText = "Now playing \(entity.title)."
+        } else if entity.title.isEmpty {
+            dialogText = "Now playing music by \(entity.artist)."
         } else {
-            dialogText = "Now playing \(song.title) by \(song.artist)."
+            dialogText = "Now playing \(entity.title) by \(entity.artist)."
         }
 
-        return .result(value: response, dialog: IntentDialog(dialogText))
+        return .result(
+            value: entity,
+            dialog: IntentDialog(stringLiteral: dialogText)
+        )
     }
 }
 
 @available(iOS 16.0, macOS 13.0, *)
-struct NowPlayingSongIntentResponse: Codable, Sendable, Equatable {
+struct NowPlayingSongEntity: AppEntity, Codable, Sendable, Equatable {
+    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Song")
+    static var defaultQuery = NowPlayingSongEntityQuery()
+    static var properties = EntityPropertySet {
+        Property(
+            \NowPlayingSongEntity.title,
+            id: "title",
+            name: "Title"
+        )
+        Property(
+            \NowPlayingSongEntity.artist,
+            id: "artist",
+            name: "Artist"
+        )
+        Property(
+            \NowPlayingSongEntity.album,
+            id: "album",
+            name: "Album"
+        )
+        Property(
+            \NowPlayingSongEntity.capturedAt,
+            id: "capturedAt",
+            name: "Captured At"
+        )
+    }
+
+    var id: String { identifier }
     var artist: String
     var album: String
     var title: String
     var capturedAt: Date
 
-    init(artist: String, album: String, title: String, capturedAt: Date) {
-        self.artist = artist
-        self.album = album
-        self.title = title
-        self.capturedAt = capturedAt
+    private let identifier: String
+
+    var displayRepresentation: DisplayRepresentation {
+        if !title.isEmpty && !artist.isEmpty {
+            return DisplayRepresentation(title: LocalizedStringResource(stringLiteral: title), subtitle: LocalizedStringResource(stringLiteral: artist))
+        }
+
+        if !title.isEmpty {
+            return DisplayRepresentation(title: LocalizedStringResource(stringLiteral: title))
+        }
+
+        if !artist.isEmpty {
+            return DisplayRepresentation(title: LocalizedStringResource(stringLiteral: artist))
+        }
+
+        return DisplayRepresentation(title: LocalizedStringResource(stringLiteral: "Unknown Song"))
     }
 
-    init(from song: NowPlayingSharedSong) {
-        self.init(artist: song.artist, album: song.album, title: song.title, capturedAt: song.capturedAt)
+    var isEmpty: Bool {
+        artist.isEmpty && album.isEmpty && title.isEmpty
+    }
+
+    init(song: NowPlayingSharedSong) {
+        self.artist = song.artist
+        self.album = song.album
+        self.title = song.title
+        self.capturedAt = song.capturedAt
+        self.identifier = Self.makeIdentifier(song: song)
+    }
+
+    private static func makeIdentifier(song: NowPlayingSharedSong) -> String {
+        if song.capturedAt == .distantPast {
+            return "now-playing-empty"
+        }
+
+        let timestamp = ISO8601DateFormatter().string(from: song.capturedAt)
+        return "now-playing-\(timestamp)"
+    }
+}
+
+@available(iOS 16.0, macOS 13.0, *)
+struct NowPlayingSongEntityQuery: EntityQuery {
+    func entities(for identifiers: [NowPlayingSongEntity.ID]) async throws -> [NowPlayingSongEntity] {
+        guard
+            let entity = Self.currentSong(),
+            identifiers.contains(entity.id)
+        else {
+            return []
+        }
+
+        return [entity]
+    }
+
+    func suggestedEntities() async throws -> [NowPlayingSongEntity] {
+        guard let entity = Self.currentSong(), !entity.isEmpty else {
+            return []
+        }
+
+        return [entity]
+    }
+
+    func defaultResult() async -> NowPlayingSongEntity? {
+        guard let entity = Self.currentSong(), !entity.isEmpty else {
+            return nil
+        }
+
+        return entity
+    }
+
+    private static func currentSong() -> NowPlayingSongEntity? {
+        guard let song = NowPlayingSharedStore.loadSong() else { return nil }
+        return NowPlayingSongEntity(song: song)
     }
 }
