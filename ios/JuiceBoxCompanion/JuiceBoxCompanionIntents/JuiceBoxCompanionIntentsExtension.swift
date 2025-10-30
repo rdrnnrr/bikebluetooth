@@ -10,18 +10,27 @@ struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
 
     static var appShortcutsTitle: LocalizedStringResource { "JuiceBox Companion" }
 
-    static var appShortcuts: [AppShortcut] {
-        [
-            AppShortcut(
-                intent: GetNowPlayingSongIntent(),
-                phrases: [
-                    "Get ${applicationName} song",
-                    "What is ${applicationName} playing",
-                    "Get current ${applicationName} song"
-                ],
-                shortTitle: "Current Song",
-                systemImageName: "music.note"
-            )
-        ]
+    private static var nowPlayingShortcut: AppShortcut {
+        AppShortcut(
+            intent: GetNowPlayingSongIntent(),
+            phrases: [
+                "Get ${applicationName} song",
+                "What is ${applicationName} playing",
+                "Get current ${applicationName} song"
+            ],
+            shortTitle: "Current Song",
+            systemImageName: "music.note"
+        )
     }
+
+#if compiler(>=5.8)
+    static var appShortcuts: [AppShortcut] {
+        [nowPlayingShortcut]
+    }
+#else
+    @AppShortcutsBuilder
+    static var appShortcuts: AppShortcut {
+        nowPlayingShortcut
+    }
+#endif
 }
