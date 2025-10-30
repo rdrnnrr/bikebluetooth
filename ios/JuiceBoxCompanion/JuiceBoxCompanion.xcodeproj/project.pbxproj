@@ -442,7 +442,7 @@
                                 CODE_SIGN_STYLE = Automatic;
                                 GENERATE_INFOPLIST_FILE = NO;
                                 INFOPLIST_FILE = JuiceBoxCompanionIntents/Info.plist;
-                                IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+                                IPHONEOS_DEPLOYMENT_TARGET = 16.0;
                                 LD_RUNPATH_SEARCH_PATHS = (
                                         "$(inherited)",
                                         "@executable_path/Frameworks",
@@ -465,7 +465,7 @@
                                 CODE_SIGN_STYLE = Automatic;
                                 GENERATE_INFOPLIST_FILE = NO;
                                 INFOPLIST_FILE = JuiceBoxCompanionIntents/Info.plist;
-                                IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+                                IPHONEOS_DEPLOYMENT_TARGET = 16.0;
                                 LD_RUNPATH_SEARCH_PATHS = (
                                         "$(inherited)",
                                         "@executable_path/Frameworks",
