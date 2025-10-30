@@ -4,11 +4,21 @@ import AppIntents
 @main
 struct JuiceBoxCompanionIntentsExtension: AppIntentsExtension { }
 
+#if swift(>=5.9)
+@available(iOS 16.0, macOS 13.0, *)
+typealias JuiceBoxAppShortcutsCollection = [AppShortcut]
+#else
+@available(iOS 16.0, macOS 13.0, *)
+typealias JuiceBoxAppShortcutsCollection = AppShortcut
+#endif
+
 @available(iOS 16.0, macOS 13.0, *)
 struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
     static var shortcutTileColor: ShortcutTileColor { .blue }
 
-    static var appShortcuts: AppShortcut {
+    static var appShortcutsTitle: LocalizedStringResource { "JuiceBox Companion" }
+
+    private static var nowPlayingShortcut: AppShortcut {
         AppShortcut(
             intent: GetNowPlayingSongIntent(),
             phrases: [
@@ -20,4 +30,15 @@ struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
             systemImageName: "music.note"
         )
     }
+
+#if swift(>=5.9)
+    static var appShortcuts: JuiceBoxAppShortcutsCollection {
+        [nowPlayingShortcut]
+    }
+#else
+    @AppShortcutsBuilder
+    static var appShortcuts: JuiceBoxAppShortcutsCollection {
+        nowPlayingShortcut
+    }
+#endif
 }
