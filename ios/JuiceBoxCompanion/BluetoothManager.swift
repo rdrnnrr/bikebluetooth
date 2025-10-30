@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import QuartzCore
 
 final class BluetoothManager: NSObject, ObservableObject {
     struct SongPayload: Equatable {
@@ -38,6 +39,20 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var pendingScanRequest = false
     private var pendingConnection: CBPeripheral?
     private var scanFallbackWorkItem: DispatchWorkItem?
+    private var pendingServiceDiscovery = false
+
+    // Scan state/coalescing
+    private var isScanning = false
+    private var lastScanStartTime: TimeInterval = 0
+    private let minScanRestartInterval: TimeInterval = 1.0
+
+    // Send throttling/debounce
+    private var pendingSendPayload: SongPayload?
+    private var pendingSendForce: Bool = false
+    private var sendDebounceWorkItem: DispatchWorkItem?
+    private var lastSendTime: TimeInterval = 0
+    private let minSendInterval: TimeInterval = 0.5
+    private let sendDebounceDelay: TimeInterval = 0.2
 
     init(preview: Bool = false) {
         super.init()
@@ -68,6 +83,12 @@ final class BluetoothManager: NSObject, ObservableObject {
             return
         }
 
+        // Avoid rapid duplicate scan starts
+        let now = CACurrentMediaTime()
+        if isScanning && (now - lastScanStartTime) < minScanRestartInterval {
+            return
+        }
+
         scanFallbackWorkItem?.cancel()
         scanFallbackWorkItem = nil
 
@@ -77,16 +98,23 @@ final class BluetoothManager: NSObject, ObservableObject {
             return
         }
 
-        central.stopScan()
+        stopScan()
 
-        central.scanForPeripherals(
-            withServices: [serviceUUID],
-            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
-        )
-        scheduleScanFallback()
-        connectionDescription = "Scanning for remote…"
+        let hasKnown = UserDefaults.standard.string(forKey: knownPeripheralKey) != nil
+
+        if hasKnown {
+            startScan(withServices: nil)
+            connectionDescription = "Scanning for remote…"
+            scheduleScanFallback()
+        } else {
+            startScan(withServices: [serviceUUID])
+            scheduleScanFallback()
+            connectionDescription = "Scanning for remote…"
+        }
+
         errorMessage = nil
         pendingScanRequest = false
+        print("DEBUG: Started scanning (hasKnown=\(hasKnown))")
     }
 
     func toggleConnection() {
@@ -113,6 +141,7 @@ final class BluetoothManager: NSObject, ObservableObject {
         pendingConnection = nil
         central.connect(peripheral, options: nil)
         isBusy = true
+        print("DEBUG: Attempting reconnect to \(peripheral.identifier)")
     }
 
     func disconnect() {
@@ -123,15 +152,53 @@ final class BluetoothManager: NSObject, ObservableObject {
         startScanning()
     }
 
+    // Public API stays the same; internally route through debounced/throttled sender
     func send(song: SongPayload, force: Bool = false) {
-        guard canSend,
-              let peripheral = discoveredPeripheral,
-              let rxCharacteristic = rxCharacteristic else { return }
+        guard canSend else { return }
 
-        // Avoid spamming identical payloads
-        guard force || song.formatted != lastSentPayload.formatted else { return }
+        // Avoid spamming identical payloads unless forced
+        if !force && song.formatted == lastSentPayload.formatted {
+            return
+        }
 
-        guard let data = (song.formatted + "\n").data(using: .utf8) else { return }
+        // Coalesce pending payloads; latest wins, force if any caller forces
+        pendingSendPayload = song
+        pendingSendForce = pendingSendForce || force
+
+        // Debounce multiple send requests quickly arriving
+        sendDebounceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.performThrottledSend()
+        }
+        sendDebounceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + sendDebounceDelay, execute: work)
+    }
+
+    private func performThrottledSend() {
+        guard canSend, let payload = pendingSendPayload else { return }
+
+        let now = CACurrentMediaTime()
+        let force = pendingSendForce
+
+        // Respect min interval unless explicitly forced
+        if !force && (now - lastSendTime) < minSendInterval {
+            let remaining = minSendInterval - (now - lastSendTime)
+            sendDebounceWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.performThrottledSend()
+            }
+            sendDebounceWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
+            return
+        }
+
+        // Clear pending state before actual write
+        pendingSendPayload = nil
+        pendingSendForce = false
+        lastSendTime = now
+
+        guard let peripheral = discoveredPeripheral, let rxCharacteristic = rxCharacteristic else { return }
+        guard let data = (payload.formatted + "\n").data(using: .utf8) else { return }
 
         let maxLength = max(peripheral.maximumWriteValueLength(for: .withResponse), 20)
         var offset = 0
@@ -142,7 +209,7 @@ final class BluetoothManager: NSObject, ObservableObject {
             offset += chunkSize
         }
 
-        lastSentPayload = song
+        lastSentPayload = payload
     }
 
     private func resetState() {
@@ -155,6 +222,18 @@ final class BluetoothManager: NSObject, ObservableObject {
         errorMessage = nil
         scanFallbackWorkItem?.cancel()
         scanFallbackWorkItem = nil
+
+        // Clear pending send state
+        pendingSendPayload = nil
+        pendingSendForce = false
+        sendDebounceWorkItem?.cancel()
+        sendDebounceWorkItem = nil
+        lastSendTime = 0
+
+        // Scan state
+        stopScan()
+
+        print("DEBUG: Reset Bluetooth state")
     }
 
     private func attemptRestoreKnownPeripheral() {
@@ -174,10 +253,11 @@ final class BluetoothManager: NSObject, ObservableObject {
             discoveredPeripheral = peripheral
             connectionDescription = "Reconnecting to remote…"
             peripheral.delegate = self
-            central.stopScan()
+            stopScan()
             central.connect(peripheral, options: nil)
             isBusy = true
             errorMessage = nil
+            print("DEBUG: Restoring known peripheral \(uuid)")
         }
     }
 
@@ -189,7 +269,7 @@ final class BluetoothManager: NSObject, ObservableObject {
         for peripheral in peripherals where isTargetPeripheral(peripheral) {
             scanFallbackWorkItem?.cancel()
             scanFallbackWorkItem = nil
-            central.stopScan()
+            stopScan()
             discoveredPeripheral = peripheral
             peripheral.delegate = self
             errorMessage = nil
@@ -198,10 +278,12 @@ final class BluetoothManager: NSObject, ObservableObject {
                 isConnected = true
                 connectionDescription = "Connected"
                 peripheral.discoverServices([serviceUUID])
+                print("DEBUG: Found already-connected peripheral \(peripheral.identifier)")
             } else {
                 connectionDescription = "Reconnecting…"
                 isBusy = true
                 central.connect(peripheral, options: nil)
+                print("DEBUG: Connecting to retrieved peripheral \(peripheral.identifier)")
             }
 
             return true
@@ -220,12 +302,10 @@ final class BluetoothManager: NSObject, ObservableObject {
             else { return }
 
             self.scanFallbackWorkItem = nil
-            central.stopScan()
-            central.scanForPeripherals(
-                withServices: nil,
-                options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
-            )
+            self.stopScan()
+            self.startScan(withServices: nil)
             self.connectionDescription = "Scanning for remote…"
+            print("DEBUG: Scan fallback to unfiltered")
         }
 
         scanFallbackWorkItem = fallback
@@ -233,24 +313,34 @@ final class BluetoothManager: NSObject, ObservableObject {
     }
 
     private func isTargetPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any] = [:]) -> Bool {
-        let nameCandidates = updateLastSeenNames(for: peripheral, advertisementData: advertisementData)
+        let candidates = updateLastSeenNames(for: peripheral, advertisementData: advertisementData)
 
+        // 1) Always accept by stored identifier (previously paired device)
         if let storedIdentifier = UserDefaults.standard.string(forKey: knownPeripheralKey),
            peripheral.identifier.uuidString == storedIdentifier {
             return true
         }
 
-        if hasExpectedName(for: peripheral) {
+        // 2) Prefer name-based matching — accept if any candidate contains "juicebox"
+        if candidates.contains(where: { $0.contains(deviceNameKeyword) }) {
+            print("DEBUG: Name match for \(peripheral.identifier) candidates=\(candidates)")
             return true
         }
 
+        // 3) Fallback to service list if present in advertisement (not required for name match)
         let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
         let overflowServices = advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? []
         let includesService = advertisedServices.contains(serviceUUID) || overflowServices.contains(serviceUUID)
-
-        if includesService && nameCandidates.isEmpty {
+        if includesService {
+            print("DEBUG: Service UUID match for \(peripheral.identifier) advertisedServices=\(advertisedServices)")
             return true
         }
+
+        // Debug log for diagnostics when we skip a device
+        #if DEBUG
+        let localName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? "<nil>"
+        print("DEBUG: Skipping peripheral \(peripheral.identifier) name=\(localName) candidates=\(candidates) advServices=\(advertisedServices)")
+        #endif
 
         return false
     }
@@ -290,7 +380,29 @@ final class BluetoothManager: NSObject, ObservableObject {
             candidates.append(currentName)
         }
 
-        return candidates.contains { $0.contains(deviceNameKeyword) }
+        let match = candidates.contains { $0.contains(deviceNameKeyword) }
+        if match {
+            print("DEBUG: Name match for \(peripheral.identifier) candidates=\(candidates)")
+        }
+        return match
+    }
+}
+
+// MARK: - Scan helpers
+private extension BluetoothManager {
+    func startScan(withServices services: [CBUUID]?) {
+        guard central.state == .poweredOn else { return }
+        let options: [String: Any] = [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        central.scanForPeripherals(withServices: services, options: options)
+        isScanning = true
+        lastScanStartTime = CACurrentMediaTime()
+    }
+
+    func stopScan() {
+        guard isScanning else { return }
+        guard central.state == .poweredOn else { return }
+        central.stopScan()
+        isScanning = false
     }
 }
 
@@ -298,11 +410,22 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
+            // If we deferred service discovery during restoration, do it now.
+            if pendingServiceDiscovery,
+               let peripheral = discoveredPeripheral,
+               peripheral.state == .connected {
+                pendingServiceDiscovery = false
+                connectionDescription = "Discovering services…"
+                print("DEBUG: Resuming deferred service discovery for \(peripheral.identifier)")
+                peripheral.discoverServices([serviceUUID])
+            }
+
             if let pendingConnection {
                 self.pendingConnection = nil
                 pendingScanRequest = false
                 central.connect(pendingConnection, options: nil)
                 isBusy = true
+                print("DEBUG: Resuming pending connection \(pendingConnection.identifier)")
             } else if pendingScanRequest || !isConnected {
                 startScanning()
             }
@@ -311,15 +434,19 @@ extension BluetoothManager: CBCentralManagerDelegate {
         case .poweredOff:
             connectionDescription = "Turn on Bluetooth"
             errorMessage = nil
+            stopScan()
         case .unauthorized:
             connectionDescription = "Bluetooth access denied"
             errorMessage = "Enable Bluetooth permissions in Settings"
+            stopScan()
         case .unsupported:
             connectionDescription = "Bluetooth unsupported"
             errorMessage = "This device cannot connect to the remote"
+            stopScan()
         default:
             connectionDescription = "Bluetooth unavailable"
             errorMessage = nil
+            stopScan()
         }
     }
 
@@ -331,10 +458,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
             pendingScanRequest = true
             connectionDescription = "Waiting for Bluetooth…"
             isBusy = true
+            print("DEBUG: Queued connection for \(peripheral.identifier) (Bluetooth not powered on)")
             return
         }
 
-        central.stopScan()
+        stopScan()
         scanFallbackWorkItem?.cancel()
         scanFallbackWorkItem = nil
         pendingConnection = nil
@@ -342,14 +470,16 @@ extension BluetoothManager: CBCentralManagerDelegate {
         isBusy = true
         connectionDescription = "Connecting…"
         errorMessage = nil
+        print("DEBUG: Discovered and connecting to \(peripheral.identifier) name=\(peripheral.name ?? "<nil>")")
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         pendingConnection = nil
         discoveredPeripheral = peripheral
         peripheral.delegate = self
-        peripheral.discoverServices([serviceUUID])
         connectionDescription = "Discovering services…"
+        peripheral.discoverServices([serviceUUID])
+        print("DEBUG: Connected to \(peripheral.identifier)")
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -357,6 +487,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         errorMessage = error?.localizedDescription ?? "Failed to connect"
         connectionDescription = "Tap Connect to retry"
         isBusy = false
+        print("DEBUG: Failed to connect \(peripheral.identifier) error=\(error?.localizedDescription ?? "<none>")")
         startScanning()
     }
 
@@ -367,6 +498,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         if let error = error {
             errorMessage = error.localizedDescription
         }
+        print("DEBUG: Disconnected \(peripheral.identifier) error=\(error?.localizedDescription ?? "<none>")")
         startScanning()
     }
 
@@ -380,28 +512,40 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 if peripheral.state == .connected {
                     isConnected = true
                     connectionDescription = "Connected"
-                    peripheral.discoverServices([serviceUUID])
+                    // If we can't safely discover yet, defer until poweredOn.
+                    if central.state == .poweredOn {
+                        connectionDescription = "Discovering services…"
+                        peripheral.discoverServices([serviceUUID])
+                        print("DEBUG: Will restore connected peripheral \(peripheral.identifier) and discover services")
+                    } else {
+                        pendingServiceDiscovery = true
+                        print("DEBUG: Will restore connected peripheral \(peripheral.identifier) (defer service discovery)")
+                    }
                 } else if peripheral.state == .connecting {
                     connectionDescription = "Reconnecting…"
                     isBusy = true
+                    print("DEBUG: Will restore connecting peripheral \(peripheral.identifier)")
                 } else if central.state == .poweredOn {
                     central.connect(peripheral, options: nil)
                     isBusy = true
+                    print("DEBUG: Will restore and connect \(peripheral.identifier)")
                 } else {
                     pendingConnection = peripheral
                     pendingScanRequest = true
                     connectionDescription = "Waiting for Bluetooth…"
                     isBusy = true
+                    print("DEBUG: Will restore and queue \(peripheral.identifier)")
                 }
                 break
             }
         }
 
+        // If the system indicates scanning state, request a scan after power-on instead of starting immediately.
         if discoveredPeripheral == nil,
            let scannedServices = dict[CBCentralManagerRestoredStateScanServicesKey] as? [CBUUID],
            !scannedServices.isEmpty {
-            pendingScanRequest = false
-            startScanning()
+            pendingScanRequest = true
+            print("DEBUG: Will restore scanning with services \(scannedServices) (deferred until poweredOn)")
         }
     }
 }
@@ -411,6 +555,7 @@ extension BluetoothManager: CBPeripheralDelegate {
         if let error = error {
             errorMessage = error.localizedDescription
             isBusy = false
+            print("DEBUG: Discover services error=\(error.localizedDescription)")
             return
         }
         guard let services = peripheral.services else { return }
@@ -423,6 +568,7 @@ extension BluetoothManager: CBPeripheralDelegate {
         if let error = error {
             errorMessage = error.localizedDescription
             isBusy = false
+            print("DEBUG: Discover characteristics error=\(error.localizedDescription)")
             return
         }
         guard let characteristics = service.characteristics else { return }
@@ -441,15 +587,18 @@ extension BluetoothManager: CBPeripheralDelegate {
         isConnected = txCharacteristic != nil && rxCharacteristic != nil
         isBusy = false
         connectionDescription = isConnected ? "Connected" : "Missing UART characteristic"
+        print("DEBUG: Characteristics set tx=\(txCharacteristic != nil) rx=\(rxCharacteristic != nil)")
 
         if isConnected && !hadConnection && shouldPersistPeripheral(peripheral) {
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralKey)
+            print("DEBUG: Persisted known peripheral \(peripheral.identifier)")
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             errorMessage = error.localizedDescription
+            print("DEBUG: Update value error=\(error.localizedDescription)")
             return
         }
         guard characteristic.uuid == txUUID,
@@ -468,6 +617,7 @@ private extension BluetoothManager {
             break
         case "REQ|SONG":
             if lastSentPayload != .empty {
+                // Force to bypass throttle so the remote gets the payload promptly on request.
                 send(song: lastSentPayload, force: true)
             }
             if shouldPersistPeripheral(peripheral) {
