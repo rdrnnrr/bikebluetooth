@@ -22,5 +22,16 @@ struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
             shortTitle: "Current Song",
             systemImageName: "music.note"
         )
+
+        AppShortcut(
+            intent: SetNowPlayingSongIntent(),
+            phrases: [
+                "Set ${applicationName} song",
+                "Update ${applicationName} song info",
+                "Share song with ${applicationName}"
+            ],
+            shortTitle: "Update Song",
+            systemImageName: "square.and.pencil"
+        )
     }
 }
