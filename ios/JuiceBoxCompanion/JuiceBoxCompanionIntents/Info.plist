@@ -25,6 +25,7 @@
             <key>IntentsSupported</key>
             <array>
                 <string>GetNowPlayingSongIntent</string>
+                <string>SetNowPlayingSongIntent</string>
             </array>
         </dict>
         <key>NSExtensionPointIdentifier</key>
