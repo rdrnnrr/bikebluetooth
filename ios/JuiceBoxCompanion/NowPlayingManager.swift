@@ -3,6 +3,7 @@ import Combine
 import MediaPlayer
 import UIKit
 import Darwin
+import QuartzCore
 
 final class NowPlayingManager: ObservableObject {
     struct Song: Equatable {
@@ -39,6 +40,9 @@ final class NowPlayingManager: ObservableObject {
     private static let nowPlayingInfoTitleKeys: [String] = [
         MPMediaItemPropertyTitle,
         "kMRMediaRemoteNowPlayingInfoTitle",
+        "kMRMediaRemoteNowPlayingInfoTitleData",
+        "kMRMediaRemoteNowPlayingInfoLocalizedTitle",
+        "kMRMediaRemoteNowPlayingInfoLocalizedContentTitle",
         "title",
         "song",
         "trackName",
@@ -50,19 +54,24 @@ final class NowPlayingManager: ObservableObject {
         MPMediaItemPropertyAlbumArtist,
         "kMRMediaRemoteNowPlayingInfoArtist",
         "kMRMediaRemoteNowPlayingInfoAlbumArtist",
+        "kMRMediaRemoteNowPlayingInfoArtistData",
+        "kMRMediaRemoteNowPlayingInfoLocalizedArtistName",
         "artist",
         "subtitle",
         "performer",
         "kMRMediaRemoteNowPlayingInfoPerformer",
         "kMRMediaRemoteNowPlayingInfoRadioStationName",
+        "kMRMediaRemoteNowPlayingInfoContentSubTitle",
         "kMRMediaRemoteNowPlayingInfoContentAuthor",
         "kMRMediaRemoteNowPlayingInfoSubtitle"
     ]
     private static let nowPlayingInfoAlbumKeys: [String] = [
         MPMediaItemPropertyAlbumTitle,
         "kMRMediaRemoteNowPlayingInfoAlbum",
+        "kMRMediaRemoteNowPlayingInfoAlbumData",
         "album",
         "collection",
+        "kMRMediaRemoteNowPlayingInfoCollectionName",
         "kMRMediaRemoteNowPlayingInfoContentCollection",
         "kMRMediaRemoteNowPlayingInfoLocalizedAlbumName"
     ]
@@ -75,10 +84,19 @@ final class NowPlayingManager: ObservableObject {
     private var notificationsActive = false
     private var wantsMonitoring = false
     private var musicPlayerMonitoringActive = false
+    private var cachedNowPlayingInfo: [String: Any]?
+
+    // Throttling/debounce
+    private var lastUpdateTime: TimeInterval = 0
+    private let minUpdateInterval: TimeInterval = 1.0
+    private let debounceDelay: TimeInterval = 0.3
+    private var pendingDebounceWorkItem: DispatchWorkItem?
 
     init(preview: Bool = false) {
         if preview {
             currentSong = Song(artist: "Daft Punk", album: "Discovery", title: "Harder, Better, Faster, Stronger")
+        } else if let saved = NowPlayingSharedStore.loadSong() {
+            currentSong = Self.song(from: saved)
         }
     }
 
@@ -97,6 +115,8 @@ final class NowPlayingManager: ObservableObject {
         deactivateMusicPlayerMonitoring()
         notificationsActive = false
         cancellables.removeAll()
+        pendingDebounceWorkItem?.cancel()
+        pendingDebounceWorkItem = nil
         DispatchQueue.main.async { [weak self] in
             self?.currentSong = .empty
             NowPlayingSharedStore.save(song: nil)
@@ -112,29 +132,30 @@ final class NowPlayingManager: ObservableObject {
             notificationsActive = true
 
             Self.nowPlayingInfoCenterNotifications.forEach { name in
-                NotificationCenter.default.publisher(for: name, object: MPNowPlayingInfoCenter.default())
-                    .sink { [weak self] _ in
-                        self?.updateNowPlayingMetadata()
+                NotificationCenter.default.publisher(for: name)
+                    .sink { [weak self] notification in
+                        self?.handleNowPlayingNotification(notification)
                     }
                     .store(in: &cancellables)
             }
 
             NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
                 .sink { [weak self] _ in
-                    self?.updateNowPlayingMetadata()
+                    self?.scheduleDebouncedUpdate()
                 }
                 .store(in: &cancellables)
 
-            Timer.publish(every: 5, on: .main, in: .common)
+            // Slightly reduce frequency to 7s to avoid log spam
+            Timer.publish(every: 7, on: .main, in: .common)
                 .autoconnect()
                 .sink { [weak self] _ in
-                    self?.updateNowPlayingMetadata()
+                    self?.scheduleDebouncedUpdate()
                 }
                 .store(in: &cancellables)
         }
 
         configureMusicPlayerMonitoring()
-        updateNowPlayingMetadata()
+        scheduleDebouncedUpdate()
     }
 
     private func configureMusicPlayerMonitoring() {
@@ -150,7 +171,7 @@ final class NowPlayingManager: ObservableObject {
                     if newStatus == .authorized {
                         self.authorizationError = nil
                         self.activateMusicPlayerMonitoring()
-                        self.updateNowPlayingMetadata()
+                        self.scheduleDebouncedUpdate()
                     } else {
                         self.handleMediaLibraryDenied()
                     }
@@ -171,13 +192,13 @@ final class NowPlayingManager: ObservableObject {
 
         NotificationCenter.default.publisher(for: .MPMusicPlayerControllerNowPlayingItemDidChange, object: musicPlayer)
             .sink { [weak self] _ in
-                self?.updateNowPlayingMetadata()
+                self?.scheduleDebouncedUpdate()
             }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .MPMusicPlayerControllerPlaybackStateDidChange, object: musicPlayer)
             .sink { [weak self] _ in
-                self?.updateNowPlayingMetadata()
+                self?.scheduleDebouncedUpdate()
             }
             .store(in: &cancellables)
     }
@@ -196,27 +217,79 @@ final class NowPlayingManager: ObservableObject {
         }
     }
 
+    // MARK: - Debounce/Throttle
+
+    private func scheduleDebouncedUpdate() {
+        guard notificationsActive else { return }
+
+        // Cancel any pending debounce
+        pendingDebounceWorkItem?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            self?.updateNowPlayingMetadataThrottled()
+        }
+        pendingDebounceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounceDelay, execute: work)
+    }
+
+    private func updateNowPlayingMetadataThrottled() {
+        let now = CACurrentMediaTime()
+        if now - lastUpdateTime < minUpdateInterval {
+            // Too soon — schedule a single trailing call at the boundary.
+            let remaining = minUpdateInterval - (now - lastUpdateTime)
+            pendingDebounceWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.updateNowPlayingMetadata()
+            }
+            pendingDebounceWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
+            return
+        }
+
+        lastUpdateTime = now
+        updateNowPlayingMetadata()
+    }
+
+    // MARK: - Metadata
+
     private func updateNowPlayingMetadata() {
         guard notificationsActive else { return }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-
-            let activeInfo = self.activeNowPlayingInfo()
-            print("DEBUG: nowPlayingInfo dictionary: \(activeInfo ?? [:])")
-            let infoSong = self.songFromNowPlayingInfo(activeInfo)
-            let playerSong = self.musicPlayerMonitoringActive ? self.songFromMediaItem(self.musicPlayer.nowPlayingItem) : nil
-            let song = infoSong ?? playerSong ?? .empty
-
-            DispatchQueue.main.async {
-                if song != .empty {
-                    self.authorizationError = nil
-                }
-                self.currentSong = song
-                let sharedSong = song == .empty ? nil : NowPlayingSharedSong(artist: song.artist, album: song.album, title: song.title)
-                NowPlayingSharedStore.save(song: sharedSong)
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateNowPlayingMetadata()
             }
+            return
         }
+
+        let activeInfo = activeNowPlayingInfo()
+        #if DEBUG
+        if let activeInfo, !NSDictionary(dictionary: activeInfo).isEqual(to: cachedNowPlayingInfo ?? [:]) {
+            print("DEBUG: nowPlayingInfo dictionary: \(activeInfo)")
+        }
+        #endif
+        let infoSong = songFromNowPlayingInfo(activeInfo)
+        let playerSong = musicPlayerMonitoringActive ? songFromMediaItem(musicPlayer.nowPlayingItem) : nil
+        let storedSharedSong = NowPlayingSharedStore.loadSong()
+        let storedSong = storedSharedSong.map(Self.song(from:))
+        let song = infoSong ?? playerSong ?? storedSong ?? .empty
+
+        if song != .empty {
+            authorizationError = nil
+        }
+        currentSong = song
+        let sharedSong: NowPlayingSharedSong?
+        if song == .empty {
+            sharedSong = nil
+        } else if let infoSong {
+            sharedSong = NowPlayingSharedSong(artist: infoSong.artist, album: infoSong.album, title: infoSong.title)
+        } else if let playerSong {
+            sharedSong = NowPlayingSharedSong(artist: playerSong.artist, album: playerSong.album, title: playerSong.title)
+        } else {
+            sharedSong = storedSharedSong
+        }
+
+        NowPlayingSharedStore.save(song: sharedSong)
     }
 
     private func songFromNowPlayingInfo(_ info: [String: Any]?) -> Song? {
@@ -233,10 +306,49 @@ final class NowPlayingManager: ObservableObject {
 
     private func activeNowPlayingInfo() -> [String: Any]? {
         if let info = MPNowPlayingInfoCenter.default().nowPlayingInfo, !info.isEmpty {
+            cachedNowPlayingInfo = info
             return info
         }
 
+        if let cached = cachedNowPlayingInfo, !cached.isEmpty {
+            return cached
+        }
+
+        #if !targetEnvironment(simulator)
+        // Only attempt MediaRemote when the app is active to avoid spurious "Operation not permitted" logs.
+        if UIApplication.shared.applicationState == .active,
+           let remoteInfo = MediaRemoteReader.nowPlayingInfo() {
+            cachedNowPlayingInfo = remoteInfo
+            return remoteInfo
+        }
+        #endif
+
         return nil
+    }
+
+    private func handleNowPlayingNotification(_ notification: Notification) {
+        if let userInfo = notification.userInfo, !userInfo.isEmpty {
+            var normalized: [String: Any] = [:]
+            for (key, value) in userInfo {
+                switch key {
+                case let stringKey as String:
+                    normalized[stringKey] = value
+                case let stringKey as NSString:
+                    normalized[stringKey as String] = value
+                default:
+                    continue
+                }
+            }
+
+            if !normalized.isEmpty {
+                cachedNowPlayingInfo = normalized
+                #if DEBUG
+                print("DEBUG: notification userInfo for \(notification.name.rawValue): \(normalized)")
+                #endif
+            }
+        }
+
+        scheduleDebouncedUpdate()
     }
 
     private func songFromMediaItem(_ item: MPMediaItem?) -> Song? {
@@ -249,6 +361,10 @@ final class NowPlayingManager: ObservableObject {
         guard [title, artist, album].contains(where: { !$0.isEmpty }) else { return nil }
 
         return Song(artist: artist, album: album, title: title)
+    }
+
+    private static func song(from shared: NowPlayingSharedSong) -> Song {
+        Song(artist: shared.artist, album: shared.album, title: shared.title)
     }
 
     @MainActor
@@ -331,6 +447,29 @@ private extension NowPlayingManager {
         if let number = value as? NSNumber {
             let trimmed = number.stringValue.trimmed
             return trimmed.isEmpty ? nil : trimmed
+        }
+
+        if let data = value as? Data, !data.isEmpty {
+            let encodings: [String.Encoding] = [.utf8, .utf16LittleEndian, .utf16BigEndian, .ascii]
+            for encoding in encodings {
+                if let decoded = String(data: data, encoding: encoding)?.trimmed, !decoded.isEmpty {
+                    return decoded
+                }
+            }
+
+            if let attributed = try? NSAttributedString(data: data,
+                                                        options: [.documentType: NSAttributedString.DocumentType.html],
+                                                        documentAttributes: nil) {
+                let trimmed = attributed.string.trimmed
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+
+            if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+               let normalized = normalizedValue(plist) {
+                return normalized
+            }
         }
 
         if let dictionary = value as? [String: Any] {
