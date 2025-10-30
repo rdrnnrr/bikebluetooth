@@ -12,6 +12,7 @@
 		1F0A6F292AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */; };
 		1F0A6F2A2AF1E19B0074D3A8 /* BluetoothManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */; };
 		1F0A6F2B2AF1E19B0074D3A8 /* NowPlayingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */; };
+        6A65C2A52B4D4F7000CA1B77 /* MediaRemoteReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A65C2A42B4D4F7000CA1B77 /* MediaRemoteReader.swift */; };
 		1F0A6F2C2AF1E19B0074D3A8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */; };
 		1F0A6F2D2AF1E19B0074D3A8 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1F0A6F272AF1E19B0074D3A8 /* Preview Assets.xcassets */; };
 		27F9162A2EB3CE3100E753CB /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 27F916282EB3CE2C00E753CB /* AppIntents.framework */; };
@@ -19,6 +20,7 @@
 		6418129E5864465A94ABEBD5 /* JuiceBoxCompanionIntentsExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6F73D8A04A43CFB8280908 /* JuiceBoxCompanionIntentsExtension.swift */; };
 		6D305C0355CB437C9BF4B5E1 /* NowPlayingSharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6C5B7BE0DBA4DB194061F38 /* NowPlayingSharedStore.swift */; };
 		ED510BD8BCC2408C9BE2139C /* GetNowPlayingSongIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BFACC5EA26D46FF9CBF5550 /* GetNowPlayingSongIntent.swift */; };
+		6A65C2A72B4D4F8E00CA1B77 /* SetNowPlayingSongIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A65C2A62B4D4F8E00CA1B77 /* SetNowPlayingSongIntent.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -50,12 +52,14 @@
 		1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JuiceBoxCompanionApp.swift; sourceTree = "<group>"; };
 		1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothManager.swift; sourceTree = "<group>"; };
 		1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingManager.swift; sourceTree = "<group>"; };
+        6A65C2A42B4D4F7000CA1B77 /* MediaRemoteReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaRemoteReader.swift; sourceTree = "<group>"; };
 		1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1F0A6F262AF1E19B0074D3A8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		1F0A6F272AF1E19B0074D3A8 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		1F0A6F2F2AF1E19B0074D3A8 /* JuiceBoxCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JuiceBoxCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		27F916282EB3CE2C00E753CB /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 		2BFACC5EA26D46FF9CBF5550 /* GetNowPlayingSongIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GetNowPlayingSongIntent.swift; sourceTree = "<group>"; };
+		6A65C2A62B4D4F8E00CA1B77 /* SetNowPlayingSongIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetNowPlayingSongIntent.swift; sourceTree = "<group>"; };
 		4ADDB66C4A0E4EF3975DD7B2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		52D0217CB47345769104F706 /* JuiceBoxCompanionIntents.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = JuiceBoxCompanionIntents.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		57F80DBCFFC14DD092027160 /* JuiceBoxCompanionIntents.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JuiceBoxCompanionIntents.entitlements; sourceTree = "<group>"; };
@@ -87,6 +91,7 @@
 			isa = PBXGroup;
 			children = (
 				2BFACC5EA26D46FF9CBF5550 /* GetNowPlayingSongIntent.swift */,
+				6A65C2A62B4D4F8E00CA1B77 /* SetNowPlayingSongIntent.swift */,
 				FE6F73D8A04A43CFB8280908 /* JuiceBoxCompanionIntentsExtension.swift */,
 				4ADDB66C4A0E4EF3975DD7B2 /* Info.plist */,
 				57F80DBCFFC14DD092027160 /* JuiceBoxCompanionIntents.entitlements */,
@@ -110,7 +115,8 @@
 				1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */,
 				1F0A6F212AF1E19B0074D3A8 /* ContentView.swift */,
 				1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */,
-				1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */,
+                1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */,
+                6A65C2A42B4D4F7000CA1B77 /* MediaRemoteReader.swift */,
 				7BEC5AC6F19740CFB366A497 /* Shared */,
 				69F32D4C177541C38D9D9EC2 /* JuiceBoxCompanion.entitlements */,
 				1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */,
@@ -254,7 +260,8 @@
 				1F0A6F2A2AF1E19B0074D3A8 /* BluetoothManager.swift in Sources */,
 				1F0A6F292AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift in Sources */,
 				1F0A6F282AF1E19B0074D3A8 /* ContentView.swift in Sources */,
-				1F0A6F2B2AF1E19B0074D3A8 /* NowPlayingManager.swift in Sources */,
+                1F0A6F2B2AF1E19B0074D3A8 /* NowPlayingManager.swift in Sources */,
+                6A65C2A52B4D4F7000CA1B77 /* MediaRemoteReader.swift in Sources */,
 				6D305C0355CB437C9BF4B5E1 /* NowPlayingSharedStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -264,6 +271,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ED510BD8BCC2408C9BE2139C /* GetNowPlayingSongIntent.swift in Sources */,
+				6A65C2A72B4D4F8E00CA1B77 /* SetNowPlayingSongIntent.swift in Sources */,
 				6418129E5864465A94ABEBD5 /* JuiceBoxCompanionIntentsExtension.swift in Sources */,
 				386E032FCA104B5CB6C3FB5B /* NowPlayingSharedStore.swift in Sources */,
 			);
