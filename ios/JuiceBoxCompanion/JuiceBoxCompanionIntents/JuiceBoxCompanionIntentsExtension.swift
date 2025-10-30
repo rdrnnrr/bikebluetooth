@@ -9,11 +9,8 @@ struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
     static var shortcutTileColor: ShortcutTileColor { .blue }
 
     static var appShortcutsTitle: LocalizedStringResource { "JuiceBox Companion" }
-}
 
-@available(iOS 16.0, macOS 13.0, *)
-private extension JuiceBoxCompanionShortcuts {
-    static func nowPlayingShortcut() -> AppShortcut {
+    private static func makeNowPlayingShortcut() -> AppShortcut {
         AppShortcut(
             intent: GetNowPlayingSongIntent(),
             phrases: [
@@ -25,21 +22,14 @@ private extension JuiceBoxCompanionShortcuts {
             systemImageName: "music.note"
         )
     }
-}
 
 #if swift(>=5.9)
-@available(iOS 16.0, macOS 13.0, *)
-extension JuiceBoxCompanionShortcuts {
     static var appShortcuts: [AppShortcut] {
-        [nowPlayingShortcut()]
+        [makeNowPlayingShortcut()]
     }
-}
 #else
-@available(iOS 16.0, macOS 13.0, *)
-extension JuiceBoxCompanionShortcuts {
-    @AppShortcutsBuilder
     static var appShortcuts: AppShortcut {
-        nowPlayingShortcut()
+        makeNowPlayingShortcut()
     }
-}
 #endif
+}
