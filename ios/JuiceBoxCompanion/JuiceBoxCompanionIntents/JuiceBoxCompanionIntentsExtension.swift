@@ -23,7 +23,7 @@ struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
         )
     }
 
-#if compiler(>=5.9)
+#if swift(>=5.9)
     static var appShortcuts: [AppShortcut] {
         [nowPlayingShortcut]
     }
