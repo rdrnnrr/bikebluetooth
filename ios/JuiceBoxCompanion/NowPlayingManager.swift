@@ -97,6 +97,10 @@ final class NowPlayingManager: ObservableObject {
         deactivateMusicPlayerMonitoring()
         notificationsActive = false
         cancellables.removeAll()
+        DispatchQueue.main.async { [weak self] in
+            self?.currentSong = .empty
+            NowPlayingSharedStore.save(song: nil)
+        }
     }
 
     private func startMonitoringIfNeeded() {
@@ -188,6 +192,7 @@ final class NowPlayingManager: ObservableObject {
         if songFromNowPlayingInfo(activeNowPlayingInfo()) == nil {
             authorizationError = Self.authorizationMessage
             currentSong = .empty
+            NowPlayingSharedStore.save(song: nil)
         }
     }
 
@@ -197,7 +202,9 @@ final class NowPlayingManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
-            let infoSong = self.songFromNowPlayingInfo(self.activeNowPlayingInfo())
+            let activeInfo = self.activeNowPlayingInfo()
+            print("DEBUG: nowPlayingInfo dictionary: \(activeInfo ?? [:])")
+            let infoSong = self.songFromNowPlayingInfo(activeInfo)
             let playerSong = self.musicPlayerMonitoringActive ? self.songFromMediaItem(self.musicPlayer.nowPlayingItem) : nil
             let song = infoSong ?? playerSong ?? .empty
 
@@ -206,6 +213,8 @@ final class NowPlayingManager: ObservableObject {
                     self.authorizationError = nil
                 }
                 self.currentSong = song
+                let sharedSong = song == .empty ? nil : NowPlayingSharedSong(artist: song.artist, album: song.album, title: song.title)
+                NowPlayingSharedStore.save(song: sharedSong)
             }
         }
     }

@@ -7,64 +7,130 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		1F0A6F282AF1E19B0074D3A8 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F212AF1E19B0074D3A8 /* ContentView.swift */; };
-		1F0A6F292AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */; };
-		1F0A6F2A2AF1E19B0074D3A8 /* BluetoothManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */; };
-		1F0A6F2B2AF1E19B0074D3A8 /* NowPlayingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */; };
-		1F0A6F2C2AF1E19B0074D3A8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */; };
-		1F0A6F2D2AF1E19B0074D3A8 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1F0A6F272AF1E19B0074D3A8 /* Preview Assets.xcassets */; };
+                1F0A6F282AF1E19B0074D3A8 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F212AF1E19B0074D3A8 /* ContentView.swift */; };
+                1F0A6F292AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */; };
+                1F0A6F2A2AF1E19B0074D3A8 /* BluetoothManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */; };
+                1F0A6F2B2AF1E19B0074D3A8 /* NowPlayingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */; };
+                1F0A6F2C2AF1E19B0074D3A8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */; };
+                1F0A6F2D2AF1E19B0074D3A8 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1F0A6F272AF1E19B0074D3A8 /* Preview Assets.xcassets */; };
+                6D305C0355CB437C9BF4B5E1 /* NowPlayingSharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6C5B7BE0DBA4DB194061F38 /* NowPlayingSharedStore.swift */; };
+                386E032FCA104B5CB6C3FB5B /* NowPlayingSharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6C5B7BE0DBA4DB194061F38 /* NowPlayingSharedStore.swift */; };
+                ED510BD8BCC2408C9BE2139C /* GetNowPlayingSongIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BFACC5EA26D46FF9CBF5550 /* GetNowPlayingSongIntent.swift */; };
+                6418129E5864465A94ABEBD5 /* JuiceBoxCompanionIntentsExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6F73D8A04A43CFB8280908 /* JuiceBoxCompanionIntentsExtension.swift */; };
+                1CD4B03B51954E0A9A285CB5 /* JuiceBoxCompanionIntents.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 52D0217CB47345769104F706 /* JuiceBoxCompanionIntents.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		1F0A6F212AF1E19B0074D3A8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JuiceBoxCompanionApp.swift; sourceTree = "<group>"; };
-		1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothManager.swift; sourceTree = "<group>"; };
-		1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingManager.swift; sourceTree = "<group>"; };
-		1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		1F0A6F262AF1E19B0074D3A8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		1F0A6F272AF1E19B0074D3A8 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
-		1F0A6F2F2AF1E19B0074D3A8 /* JuiceBoxCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JuiceBoxCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
+                1F0A6F212AF1E19B0074D3A8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+                1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JuiceBoxCompanionApp.swift; sourceTree = "<group>"; };
+                1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothManager.swift; sourceTree = "<group>"; };
+                1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingManager.swift; sourceTree = "<group>"; };
+                1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+                1F0A6F262AF1E19B0074D3A8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+                1F0A6F272AF1E19B0074D3A8 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+                1F0A6F2F2AF1E19B0074D3A8 /* JuiceBoxCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JuiceBoxCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
+                F6C5B7BE0DBA4DB194061F38 /* NowPlayingSharedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingSharedStore.swift; sourceTree = "<group>"; };
+                69F32D4C177541C38D9D9EC2 /* JuiceBoxCompanion.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JuiceBoxCompanion.entitlements; sourceTree = "<group>"; };
+                2BFACC5EA26D46FF9CBF5550 /* GetNowPlayingSongIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GetNowPlayingSongIntent.swift; sourceTree = "<group>"; };
+                FE6F73D8A04A43CFB8280908 /* JuiceBoxCompanionIntentsExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JuiceBoxCompanionIntentsExtension.swift; sourceTree = "<group>"; };
+                4ADDB66C4A0E4EF3975DD7B2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+                57F80DBCFFC14DD092027160 /* JuiceBoxCompanionIntents.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = JuiceBoxCompanionIntents.entitlements; sourceTree = "<group>"; };
+                52D0217CB47345769104F706 /* JuiceBoxCompanionIntents.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = JuiceBoxCompanionIntents.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		1F0A6F1D2AF1E19B0074D3A8 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
+                1F0A6F1D2AF1E19B0074D3A8 /* Frameworks */ = {
+                        isa = PBXFrameworksBuildPhase;
+                        buildActionMask = 2147483647;
+                        files = (
+                        );
+                        runOnlyForDeploymentPostprocessing = 0;
+                };
+                A6FC57FEF7C24476BEE44DF7 /* Frameworks */ = {
+                        isa = PBXFrameworksBuildPhase;
+                        buildActionMask = 2147483647;
+                        files = (
+                        );
+                        runOnlyForDeploymentPostprocessing = 0;
+                };
 /* End PBXFrameworksBuildPhase section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+                7AEC4489E925418B819A1381 /* Embed App Extensions */ = {
+                        isa = PBXCopyFilesBuildPhase;
+                        buildActionMask = 2147483647;
+                        dstPath = "";
+                        dstSubfolderSpec = 13;
+                        files = (
+                                1CD4B03B51954E0A9A285CB5 /* JuiceBoxCompanionIntents.appex in Embed App Extensions */,
+                        );
+                        name = "Embed App Extensions";
+                        runOnlyForDeploymentPostprocessing = 0;
+                };
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXContainerItemProxy section */
+                A2405FA8FA6245B4B400CF54 /* PBXContainerItemProxy */ = {
+                        isa = PBXContainerItemProxy;
+                        containerPortal = 1F0A6F182AF1E19B0074D3A8 /* Project object */;
+                        proxyType = 1;
+                        remoteGlobalIDString = C3841ADE58BE41A59625806A;
+                        remoteInfo = JuiceBoxCompanionIntents;
+                };
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXGroup section */
-		1F0A6F172AF1E19B0074D3A8 = {
-			isa = PBXGroup;
-			children = (
-				1F0A6F202AF1E19B0074D3A8,
-				1F0A6F2E2AF1E19B0074D3A8,
-			);
-			sourceTree = "<group>";
-		};
-		1F0A6F202AF1E19B0074D3A8 = {
-			isa = PBXGroup;
-			children = (
-				1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */,
-				1F0A6F212AF1E19B0074D3A8 /* ContentView.swift */,
-				1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */,
-				1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */,
-				1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */,
-				1F0A6F262AF1E19B0074D3A8 /* Info.plist */,
-				1F0A6F302AF1E19B0074D3A8 /* Preview Content */,
-			);
-			sourceTree = SOURCE_ROOT;
-		};
-		1F0A6F2E2AF1E19B0074D3A8 = {
-			isa = PBXGroup;
-			children = (
-				1F0A6F2F2AF1E19B0074D3A8 /* JuiceBoxCompanion.app */,
-			);
-			sourceTree = "<group>";
-		};
+                1F0A6F172AF1E19B0074D3A8 = {
+                        isa = PBXGroup;
+                        children = (
+                                1F0A6F202AF1E19B0074D3A8,
+                                00CC0B02A2C24BFA92F9F929 /* JuiceBoxCompanionIntents */,
+                                1F0A6F2E2AF1E19B0074D3A8,
+                        );
+                        sourceTree = "<group>";
+                };
+                1F0A6F202AF1E19B0074D3A8 = {
+                        isa = PBXGroup;
+                        children = (
+                                1F0A6F222AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift */,
+                                1F0A6F212AF1E19B0074D3A8 /* ContentView.swift */,
+                                1F0A6F232AF1E19B0074D3A8 /* BluetoothManager.swift */,
+                                1F0A6F242AF1E19B0074D3A8 /* NowPlayingManager.swift */,
+                                7BEC5AC6F19740CFB366A497 /* Shared */,
+                                69F32D4C177541C38D9D9EC2 /* JuiceBoxCompanion.entitlements */,
+                                1F0A6F252AF1E19B0074D3A8 /* Assets.xcassets */,
+                                1F0A6F262AF1E19B0074D3A8 /* Info.plist */,
+                                1F0A6F302AF1E19B0074D3A8 /* Preview Content */,
+                        );
+                        sourceTree = SOURCE_ROOT;
+                };
+                1F0A6F2E2AF1E19B0074D3A8 = {
+                        isa = PBXGroup;
+                        children = (
+                                1F0A6F2F2AF1E19B0074D3A8 /* JuiceBoxCompanion.app */,
+                                52D0217CB47345769104F706 /* JuiceBoxCompanionIntents.appex */,
+                        );
+                        sourceTree = "<group>";
+                };
+                7BEC5AC6F19740CFB366A497 /* Shared */ = {
+                        isa = PBXGroup;
+                        children = (
+                                F6C5B7BE0DBA4DB194061F38 /* NowPlayingSharedStore.swift */,
+                        );
+                        path = Shared;
+                        sourceTree = "<group>";
+                };
+                00CC0B02A2C24BFA92F9F929 /* JuiceBoxCompanionIntents */ = {
+                        isa = PBXGroup;
+                        children = (
+                                2BFACC5EA26D46FF9CBF5550 /* GetNowPlayingSongIntent.swift */,
+                                FE6F73D8A04A43CFB8280908 /* JuiceBoxCompanionIntentsExtension.swift */,
+                                4ADDB66C4A0E4EF3975DD7B2 /* Info.plist */,
+                                57F80DBCFFC14DD092027160 /* JuiceBoxCompanionIntents.entitlements */,
+                        );
+                        path = ../JuiceBoxCompanionIntents;
+                        sourceTree = SOURCE_ROOT;
+                };
 		1F0A6F302AF1E19B0074D3A8 /* Preview Content */ = {
 			isa = PBXGroup;
 			children = (
@@ -76,38 +142,60 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		1F0A6F1F2AF1E19B0074D3A8 /* JuiceBoxCompanion */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 1F0A6F332AF1E19B0074D3A8 /* Build configuration list for PBXNativeTarget "JuiceBoxCompanion" */;
-			buildPhases = (
-				1F0A6F1C2AF1E19B0074D3A8 /* Sources */,
-				1F0A6F1D2AF1E19B0074D3A8 /* Frameworks */,
-				1F0A6F1E2AF1E19B0074D3A8 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = JuiceBoxCompanion;
-			productName = JuiceBoxCompanion;
-			productReference = 1F0A6F2F2AF1E19B0074D3A8 /* JuiceBoxCompanion.app */;
-			productType = "com.apple.product-type.application";
-		};
+                1F0A6F1F2AF1E19B0074D3A8 /* JuiceBoxCompanion */ = {
+                        isa = PBXNativeTarget;
+                        buildConfigurationList = 1F0A6F332AF1E19B0074D3A8 /* Build configuration list for PBXNativeTarget "JuiceBoxCompanion" */;
+                        buildPhases = (
+                                1F0A6F1C2AF1E19B0074D3A8 /* Sources */,
+                                1F0A6F1D2AF1E19B0074D3A8 /* Frameworks */,
+                                1F0A6F1E2AF1E19B0074D3A8 /* Resources */,
+                                7AEC4489E925418B819A1381 /* Embed App Extensions */,
+                        );
+                        buildRules = (
+                        );
+                        dependencies = (
+                                BA426604646A4A3889281163 /* PBXTargetDependency */,
+                        );
+                        name = JuiceBoxCompanion;
+                        productName = JuiceBoxCompanion;
+                        productReference = 1F0A6F2F2AF1E19B0074D3A8 /* JuiceBoxCompanion.app */;
+                        productType = "com.apple.product-type.application";
+                };
+                C3841ADE58BE41A59625806A /* JuiceBoxCompanionIntents */ = {
+                        isa = PBXNativeTarget;
+                        buildConfigurationList = 2F09DC0448904B0EB1CAE565 /* Build configuration list for PBXNativeTarget "JuiceBoxCompanionIntents" */;
+                        buildPhases = (
+                                C514589E4B8841698FB90F94 /* Sources */,
+                                A6FC57FEF7C24476BEE44DF7 /* Frameworks */,
+                                6F5A08A23AE545F38AD61230 /* Resources */,
+                        );
+                        buildRules = (
+                        );
+                        dependencies = (
+                        );
+                        name = JuiceBoxCompanionIntents;
+                        productName = JuiceBoxCompanionIntents;
+                        productReference = 52D0217CB47345769104F706 /* JuiceBoxCompanionIntents.appex */;
+                        productType = "com.apple.product-type.app-extension";
+                };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		1F0A6F182AF1E19B0074D3A8 /* Project object */ = {
-			isa = PBXProject;
-			attributes = {
-				BuildIndependentTargetsInParallel = YES;
-				LastSwiftUpdateCheck = 1400;
-				LastUpgradeCheck = 2600;
-				TargetAttributes = {
-					1F0A6F1F2AF1E19B0074D3A8 = {
-						CreatedOnToolsVersion = 14.0;
-					};
-				};
-			};
+                1F0A6F182AF1E19B0074D3A8 /* Project object */ = {
+                        isa = PBXProject;
+                        attributes = {
+                                BuildIndependentTargetsInParallel = YES;
+                                LastSwiftUpdateCheck = 1400;
+                                LastUpgradeCheck = 2600;
+                                TargetAttributes = {
+                                        1F0A6F1F2AF1E19B0074D3A8 = {
+                                                CreatedOnToolsVersion = 14.0;
+                                        };
+                                        C3841ADE58BE41A59625806A = {
+                                                CreatedOnToolsVersion = 16.0;
+                                        };
+                                };
+                        };
 			buildConfigurationList = 1F0A6F1B2AF1E19B0074D3A8 /* Build configuration list for PBXProject "JuiceBoxCompanion" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
@@ -120,37 +208,64 @@
 			productRefGroup = 1F0A6F2E2AF1E19B0074D3A8;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (
-				1F0A6F1F2AF1E19B0074D3A8 /* JuiceBoxCompanion */,
-			);
-		};
+                        targets = (
+                                1F0A6F1F2AF1E19B0074D3A8 /* JuiceBoxCompanion */,
+                                C3841ADE58BE41A59625806A /* JuiceBoxCompanionIntents */,
+                        );
+                };
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		1F0A6F1E2AF1E19B0074D3A8 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				1F0A6F2D2AF1E19B0074D3A8 /* Preview Assets.xcassets in Resources */,
-				1F0A6F2C2AF1E19B0074D3A8 /* Assets.xcassets in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
+                1F0A6F1E2AF1E19B0074D3A8 /* Resources */ = {
+                        isa = PBXResourcesBuildPhase;
+                        buildActionMask = 2147483647;
+                        files = (
+                                1F0A6F2D2AF1E19B0074D3A8 /* Preview Assets.xcassets in Resources */,
+                                1F0A6F2C2AF1E19B0074D3A8 /* Assets.xcassets in Resources */,
+                        );
+                        runOnlyForDeploymentPostprocessing = 0;
+                };
+                6F5A08A23AE545F38AD61230 /* Resources */ = {
+                        isa = PBXResourcesBuildPhase;
+                        buildActionMask = 2147483647;
+                        files = (
+                        );
+                        runOnlyForDeploymentPostprocessing = 0;
+                };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		1F0A6F1C2AF1E19B0074D3A8 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				1F0A6F2A2AF1E19B0074D3A8 /* BluetoothManager.swift in Sources */,
-				1F0A6F292AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift in Sources */,
-				1F0A6F282AF1E19B0074D3A8 /* ContentView.swift in Sources */,
-				1F0A6F2B2AF1E19B0074D3A8 /* NowPlayingManager.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
+                1F0A6F1C2AF1E19B0074D3A8 /* Sources */ = {
+                        isa = PBXSourcesBuildPhase;
+                        buildActionMask = 2147483647;
+                        files = (
+                                1F0A6F2A2AF1E19B0074D3A8 /* BluetoothManager.swift in Sources */,
+                                1F0A6F292AF1E19B0074D3A8 /* JuiceBoxCompanionApp.swift in Sources */,
+                                1F0A6F282AF1E19B0074D3A8 /* ContentView.swift in Sources */,
+                                1F0A6F2B2AF1E19B0074D3A8 /* NowPlayingManager.swift in Sources */,
+                                6D305C0355CB437C9BF4B5E1 /* NowPlayingSharedStore.swift in Sources */,
+                        );
+                        runOnlyForDeploymentPostprocessing = 0;
+                };
+                C514589E4B8841698FB90F94 /* Sources */ = {
+                        isa = PBXSourcesBuildPhase;
+                        buildActionMask = 2147483647;
+                        files = (
+                                ED510BD8BCC2408C9BE2139C /* GetNowPlayingSongIntent.swift in Sources */,
+                                6418129E5864465A94ABEBD5 /* JuiceBoxCompanionIntentsExtension.swift in Sources */,
+                                386E032FCA104B5CB6C3FB5B /* NowPlayingSharedStore.swift in Sources */,
+                        );
+                        runOnlyForDeploymentPostprocessing = 0;
+                };
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+                BA426604646A4A3889281163 /* PBXTargetDependency */ = {
+                        isa = PBXTargetDependency;
+                        target = C3841ADE58BE41A59625806A /* JuiceBoxCompanionIntents */;
+                        targetProxy = A2405FA8FA6245B4B400CF54 /* PBXContainerItemProxy */;
+                };
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		1F0A6F312AF1E19B0074D3A8 /* Debug */ = {
@@ -269,15 +384,16 @@
 			};
 			name = Release;
 		};
-		1F0A6F342AF1E19B0074D3A8 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_ASSET_PATHS = "\"Preview Content\"";
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = NO;
+                1F0A6F342AF1E19B0074D3A8 /* Debug */ = {
+                        isa = XCBuildConfiguration;
+                        buildSettings = {
+                                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+                                ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+                               CODE_SIGN_ENTITLEMENTS = JuiceBoxCompanion.entitlements;
+                                CODE_SIGN_STYLE = Automatic;
+                                DEVELOPMENT_ASSET_PATHS = "\"Preview Content\"";
+                                ENABLE_PREVIEWS = YES;
+                                GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -293,30 +409,77 @@
 			};
 			name = Debug;
 		};
-		1F0A6F352AF1E19B0074D3A8 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_ASSET_PATHS = "\"Preview Content\"";
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.juicebox.JuiceBoxCompanion;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
-		};
+                1F0A6F352AF1E19B0074D3A8 /* Release */ = {
+                        isa = XCBuildConfiguration;
+                        buildSettings = {
+                                ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+                                ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+                               CODE_SIGN_ENTITLEMENTS = JuiceBoxCompanion.entitlements;
+                                CODE_SIGN_STYLE = Automatic;
+                                DEVELOPMENT_ASSET_PATHS = "\"Preview Content\"";
+                                ENABLE_PREVIEWS = YES;
+                                GENERATE_INFOPLIST_FILE = NO;
+                                INFOPLIST_FILE = Info.plist;
+                                IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+                                LD_RUNPATH_SEARCH_PATHS = (
+                                        "$(inherited)",
+                                        "@executable_path/Frameworks",
+                                );
+                                MARKETING_VERSION = 1.0;
+                                PRODUCT_BUNDLE_IDENTIFIER = com.juicebox.JuiceBoxCompanion;
+                                PRODUCT_NAME = "$(TARGET_NAME)";
+                                SWIFT_EMIT_LOC_STRINGS = YES;
+                                SWIFT_VERSION = 5.0;
+                                TARGETED_DEVICE_FAMILY = "1,2";
+                        };
+                        name = Release;
+                };
+                954877ABE8D04FCFAB76F252 /* Debug */ = {
+                        isa = XCBuildConfiguration;
+                        buildSettings = {
+                                APP_EXTENSION_API_ONLY = YES;
+                               CODE_SIGN_ENTITLEMENTS = ../JuiceBoxCompanionIntents/JuiceBoxCompanionIntents.entitlements;
+                                CODE_SIGN_STYLE = Automatic;
+                                GENERATE_INFOPLIST_FILE = NO;
+                               INFOPLIST_FILE = ../JuiceBoxCompanionIntents/Info.plist;
+                                IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+                                LD_RUNPATH_SEARCH_PATHS = (
+                                        "$(inherited)",
+                                        "@executable_path/Frameworks",
+                                        "@executable_path/../../Frameworks",
+                                );
+                                MARKETING_VERSION = 1.0;
+                                PRODUCT_BUNDLE_IDENTIFIER = com.juicebox.JuiceBoxCompanion.Intents;
+                                PRODUCT_NAME = "$(TARGET_NAME)";
+                                SKIP_INSTALL = YES;
+                                SWIFT_VERSION = 5.0;
+                                TARGETED_DEVICE_FAMILY = "1,2";
+                        };
+                        name = Debug;
+                };
+                C356135BE57841EA80DEFD27 /* Release */ = {
+                        isa = XCBuildConfiguration;
+                        buildSettings = {
+                                APP_EXTENSION_API_ONLY = YES;
+                               CODE_SIGN_ENTITLEMENTS = ../JuiceBoxCompanionIntents/JuiceBoxCompanionIntents.entitlements;
+                                CODE_SIGN_STYLE = Automatic;
+                                GENERATE_INFOPLIST_FILE = NO;
+                               INFOPLIST_FILE = ../JuiceBoxCompanionIntents/Info.plist;
+                                IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+                                LD_RUNPATH_SEARCH_PATHS = (
+                                        "$(inherited)",
+                                        "@executable_path/Frameworks",
+                                        "@executable_path/../../Frameworks",
+                                );
+                                MARKETING_VERSION = 1.0;
+                                PRODUCT_BUNDLE_IDENTIFIER = com.juicebox.JuiceBoxCompanion.Intents;
+                                PRODUCT_NAME = "$(TARGET_NAME)";
+                                SKIP_INSTALL = YES;
+                                SWIFT_VERSION = 5.0;
+                                TARGETED_DEVICE_FAMILY = "1,2";
+                        };
+                        name = Release;
+                };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -329,15 +492,24 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		1F0A6F332AF1E19B0074D3A8 /* Build configuration list for PBXNativeTarget "JuiceBoxCompanion" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				1F0A6F342AF1E19B0074D3A8 /* Debug */,
-				1F0A6F352AF1E19B0074D3A8 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
+                1F0A6F332AF1E19B0074D3A8 /* Build configuration list for PBXNativeTarget "JuiceBoxCompanion" */ = {
+                        isa = XCConfigurationList;
+                        buildConfigurations = (
+                                1F0A6F342AF1E19B0074D3A8 /* Debug */,
+                                1F0A6F352AF1E19B0074D3A8 /* Release */,
+                        );
+                        defaultConfigurationIsVisible = 0;
+                        defaultConfigurationName = Release;
+                };
+                2F09DC0448904B0EB1CAE565 /* Build configuration list for PBXNativeTarget "JuiceBoxCompanionIntents" */ = {
+                        isa = XCConfigurationList;
+                        buildConfigurations = (
+                                954877ABE8D04FCFAB76F252 /* Debug */,
+                                C356135BE57841EA80DEFD27 /* Release */,
+                        );
+                        defaultConfigurationIsVisible = 0;
+                        defaultConfigurationName = Release;
+                };
 /* End XCConfigurationList section */
 	};
 	rootObject = 1F0A6F182AF1E19B0074D3A8 /* Project object */;
