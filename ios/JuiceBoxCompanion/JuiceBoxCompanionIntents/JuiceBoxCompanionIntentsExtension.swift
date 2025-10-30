@@ -36,7 +36,6 @@ struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
         [nowPlayingShortcut]
     }
 #else
-    @AppShortcutsBuilder
     static var appShortcuts: JuiceBoxAppShortcutsCollection {
         nowPlayingShortcut
     }
