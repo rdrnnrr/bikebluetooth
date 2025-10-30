@@ -37,29 +37,6 @@ struct GetNowPlayingSongIntent: AppIntent {
 struct NowPlayingSongEntity: AppEntity, Codable, Sendable, Equatable {
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Song")
     static var defaultQuery = NowPlayingSongEntityQuery()
-    static var properties = EntityPropertySet {
-        Property(
-            \NowPlayingSongEntity.title,
-            id: "title",
-            name: "Title"
-        )
-        Property(
-            \NowPlayingSongEntity.artist,
-            id: "artist",
-            name: "Artist"
-        )
-        Property(
-            \NowPlayingSongEntity.album,
-            id: "album",
-            name: "Album"
-        )
-        Property(
-            \NowPlayingSongEntity.capturedAt,
-            id: "capturedAt",
-            name: "Captured At"
-        )
-    }
-
     var id: String { identifier }
     var artist: String
     var album: String
