@@ -8,7 +8,9 @@ struct JuiceBoxCompanionIntentsExtension: AppIntentsExtension { }
 struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
     static var shortcutTileColor: ShortcutTileColor { .blue }
 
-    static var appShortcuts: AppShortcut {
+    static var appShortcutsTitle: LocalizedStringResource { "JuiceBox Companion" }
+
+    private static func makeNowPlayingShortcut() -> AppShortcut {
         AppShortcut(
             intent: GetNowPlayingSongIntent(),
             phrases: [
@@ -20,4 +22,14 @@ struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
             systemImageName: "music.note"
         )
     }
+
+#if swift(>=5.9)
+    static var appShortcuts: [AppShortcut] {
+        [makeNowPlayingShortcut()]
+    }
+#else
+    static var appShortcuts: AppShortcut {
+        makeNowPlayingShortcut()
+    }
+#endif
 }
