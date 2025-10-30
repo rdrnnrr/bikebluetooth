@@ -4,17 +4,21 @@ import AppIntents
 @main
 struct JuiceBoxCompanionIntentsExtension: AppIntentsExtension { }
 
+#if swift(>=5.9)
 @available(iOS 16.0, macOS 13.0, *)
-struct JuiceBoxCompanionShortcuts {
-    static var tileColor: ShortcutTileColor { .blue }
+typealias JuiceBoxAppShortcutsCollection = [AppShortcut]
+#else
+@available(iOS 16.0, macOS 13.0, *)
+typealias JuiceBoxAppShortcutsCollection = AppShortcut
+#endif
 
-    static var titleResource: LocalizedStringResource { "JuiceBox Companion" }
+@available(iOS 16.0, macOS 13.0, *)
+struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
+    static var shortcutTileColor: ShortcutTileColor { .blue }
 
-    static var shortcuts: [AppShortcut] {
-        [nowPlayingShortcut]
-    }
+    static var appShortcutsTitle: LocalizedStringResource { "JuiceBox Companion" }
 
-    static var nowPlayingShortcut: AppShortcut {
+    private static var nowPlayingShortcut: AppShortcut {
         AppShortcut(
             intent: GetNowPlayingSongIntent(),
             phrases: [
@@ -26,29 +30,14 @@ struct JuiceBoxCompanionShortcuts {
             systemImageName: "music.note"
         )
     }
-}
 
 #if swift(>=5.9)
-@available(iOS 16.0, macOS 13.0, *)
-extension JuiceBoxCompanionShortcuts: AppShortcutsProvider {
-    static var shortcutTileColor: ShortcutTileColor { tileColor }
-
-    static var appShortcutsTitle: LocalizedStringResource { titleResource }
-
-    static var appShortcuts: [AppShortcut] {
-        shortcuts
+    static var appShortcuts: JuiceBoxAppShortcutsCollection {
+        [nowPlayingShortcut]
     }
-}
 #else
-@available(iOS 16.0, macOS 13.0, *)
-extension JuiceBoxCompanionShortcuts: AppShortcutsProvider {
-    static var shortcutTileColor: ShortcutTileColor { tileColor }
-
-    static var appShortcutsTitle: LocalizedStringResource { titleResource }
-
-    @AppShortcutsBuilder
-    static var appShortcuts: [AppShortcut] {
+    static var appShortcuts: JuiceBoxAppShortcutsCollection {
         nowPlayingShortcut
     }
-}
 #endif
+}
