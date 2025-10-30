@@ -1,6 +1,7 @@
 import AppIntents
 import Foundation
 
+@available(iOS 16.0, macOS 13.0, *)
 struct GetNowPlayingSongIntent: AppIntent {
     static var title: LocalizedStringResource = "Get Now Playing Song"
     static var description = IntentDescription("Returns the most recent song captured by JuiceBox Companion for use in Shortcuts.")
@@ -26,6 +27,7 @@ struct GetNowPlayingSongIntent: AppIntent {
     }
 }
 
+@available(iOS 16.0, macOS 13.0, *)
 struct NowPlayingSongIntentResponse: Codable, Sendable, Equatable {
     var artist: String
     var album: String
