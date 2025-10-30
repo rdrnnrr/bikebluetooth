@@ -4,21 +4,17 @@ import AppIntents
 @main
 struct JuiceBoxCompanionIntentsExtension: AppIntentsExtension { }
 
-#if swift(>=5.9)
 @available(iOS 16.0, macOS 13.0, *)
-typealias JuiceBoxAppShortcutsCollection = [AppShortcut]
-#else
-@available(iOS 16.0, macOS 13.0, *)
-typealias JuiceBoxAppShortcutsCollection = AppShortcut
-#endif
+struct JuiceBoxCompanionShortcuts {
+    static var tileColor: ShortcutTileColor { .blue }
 
-@available(iOS 16.0, macOS 13.0, *)
-struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
-    static var shortcutTileColor: ShortcutTileColor { .blue }
+    static var titleResource: LocalizedStringResource { "JuiceBox Companion" }
 
-    static var appShortcutsTitle: LocalizedStringResource { "JuiceBox Companion" }
+    static var shortcuts: [AppShortcut] {
+        [nowPlayingShortcut]
+    }
 
-    private static var nowPlayingShortcut: AppShortcut {
+    static var nowPlayingShortcut: AppShortcut {
         AppShortcut(
             intent: GetNowPlayingSongIntent(),
             phrases: [
@@ -30,14 +26,29 @@ struct JuiceBoxCompanionShortcuts: AppShortcutsProvider {
             systemImageName: "music.note"
         )
     }
+}
 
 #if swift(>=5.9)
-    static var appShortcuts: JuiceBoxAppShortcutsCollection {
-        [nowPlayingShortcut]
+@available(iOS 16.0, macOS 13.0, *)
+extension JuiceBoxCompanionShortcuts: AppShortcutsProvider {
+    static var shortcutTileColor: ShortcutTileColor { tileColor }
+
+    static var appShortcutsTitle: LocalizedStringResource { titleResource }
+
+    static var appShortcuts: [AppShortcut] {
+        shortcuts
     }
+}
 #else
-    static var appShortcuts: JuiceBoxAppShortcutsCollection {
+@available(iOS 16.0, macOS 13.0, *)
+extension JuiceBoxCompanionShortcuts: AppShortcutsProvider {
+    static var shortcutTileColor: ShortcutTileColor { tileColor }
+
+    static var appShortcutsTitle: LocalizedStringResource { titleResource }
+
+    @AppShortcutsBuilder
+    static var appShortcuts: [AppShortcut] {
         nowPlayingShortcut
     }
-#endif
 }
+#endif
