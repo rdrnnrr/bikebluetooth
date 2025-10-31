@@ -6,6 +6,7 @@
 #include <string>
 #include <limits.h>
 #include <cstring>
+#include <map>
 
 // ===== PINS =====
 #define JOY_X_PIN 34
@@ -53,6 +54,8 @@ NimBLEScan* bleScanner = nullptr;
 NimBLEClient* iosClient = nullptr;
 
 const uint32_t IOS_CONNECT_TIMEOUT_MS = 8000;
+const uint8_t IOS_MAX_RETRY_PER_DEVICE = 3;
+const uint32_t IOS_RETRY_BACKOFF_MS = 120000;
 
 NimBLERemoteCharacteristic* ancsNotificationSource = nullptr;
 NimBLERemoteCharacteristic* ancsControlPoint = nullptr;
@@ -97,6 +100,12 @@ bool notificationActive = false;
 bool statusActive = false;
 uint32_t currentNotificationUid = 0;
 uint8_t currentNotificationCategory = 0;
+struct FailureRecord {
+  uint8_t attempts = 0;
+  uint32_t lastAttemptMs = 0;
+};
+
+std::map<std::string, FailureRecord> iosFailureTracker;
 
 enum AmsRemoteCommand : uint8_t {
   AMS_CMD_PLAY = 0x00,
@@ -276,6 +285,28 @@ void showStatus(const String& message, uint32_t durationMs) {
 }
 
 class ClientCallbacks : public NimBLEClientCallbacks {
+  void onConnect(NimBLEClient* client) override {
+    if(client) {
+      std::string addrStd = client->getPeerAddress().toString();
+      iosFailureTracker.erase(addrStd);
+    }
+    Serial.println("Client connected");
+  }
+
+  void onConnectFail(NimBLEClient* client, int reason) override {
+    String addr = client ? String(client->getPeerAddress().toString().c_str()) : String("unknown");
+    Serial.println("Connection failed (" + String(reason) + ") for " + addr);
+    if(client) {
+      std::string addrStd = client->getPeerAddress().toString();
+      FailureRecord &entry = iosFailureTracker[addrStd];
+      if(entry.attempts < 255) {
+        entry.attempts++;
+      }
+      entry.lastAttemptMs = millis();
+      Serial.println("Failure count for " + addr + ": " + String(entry.attempts));
+    }
+  }
+
   void onDisconnect(NimBLEClient* client, int reason) override {
     String line = "iOS device disconnected";
     if(client) {
@@ -430,13 +461,28 @@ bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device) {
 
   Serial.println("Connecting to iOS device at " + String(device->getAddress().toString().c_str()));
 
+  std::string addrKeyStd = device->getAddress().toString();
+  String addrKey(addrKeyStd.c_str());
+  auto failureEntry = iosFailureTracker.find(addrKeyStd);
+  if(failureEntry != iosFailureTracker.end()) {
+    uint8_t attempts = failureEntry->second.attempts;
+    uint32_t lastTime = failureEntry->second.lastAttemptMs;
+    uint32_t now = millis();
+    if(attempts >= IOS_MAX_RETRY_PER_DEVICE && (now - lastTime) < IOS_RETRY_BACKOFF_MS) {
+      Serial.println("Skipping " + addrKey + " due to repeated failures");
+      startScan();
+      return false;
+    }
+  }
+
   if(!iosClient) {
     iosClient = NimBLEDevice::createClient();
     iosClient->setClientCallbacks(&clientCallbacks, false);
-    iosClient->setConnectionParams(12, 24, 0, 60);
+    iosClient->setConnectionParams(24, 48, 0, 120);
     iosClient->setConnectTimeout(IOS_CONNECT_TIMEOUT_MS);
   } else {
     iosClient->setClientCallbacks(&clientCallbacks, false);
+    iosClient->setConnectionParams(24, 48, 0, 120);
     iosClient->setConnectTimeout(IOS_CONNECT_TIMEOUT_MS);
     if(iosClient->isConnected()) {
       Serial.println("Already connected to iOS device");
@@ -445,7 +491,14 @@ bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device) {
   }
 
   if(!iosClient->connect(device)) {
-    Serial.println("Connection to iOS device failed");
+    Serial.print("Connection to iOS device failed, error=");
+    Serial.println(iosClient ? iosClient->getLastError() : -1);
+    FailureRecord &entry = iosFailureTracker[addrKeyStd];
+    if(entry.attempts < 255) {
+      entry.attempts++;
+    }
+    entry.lastAttemptMs = millis();
+    Serial.println("Failure count for " + addrKey + ": " + String(entry.attempts));
     if(iosClient) {
       NimBLEDevice::deleteClient(iosClient);
       iosClient = nullptr;
@@ -460,6 +513,11 @@ bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device) {
   iosConnected = true;
   Serial.println("Connected to iOS device");
   lastConnectAttempt = millis();
+  iosFailureTracker.erase(addrKeyStd);
+
+  if(iosClient && !iosClient->secureConnection()) {
+    Serial.println("Failed to initiate link encryption");
+  }
 
   bool haveAncs = setupAncs(iosClient);
   bool haveAms = setupAms(iosClient);
@@ -835,10 +893,9 @@ void loop(){
     }
 
     if(now - lastConnectAttempt > 60000) {
-      Serial.println("No iOS connection for 60s — restarting...");
-      showStatus("Restarting", 0);
-      delay(1500);
-      ESP.restart();
+      Serial.println("Still looking for iOS device...");
+      showStatus("Scanning", 1500);
+      lastConnectAttempt = now;
     }
   } else {
     lastConnectAttempt = now;
