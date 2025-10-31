@@ -684,7 +684,7 @@ void setup(){
   NimBLEDevice::init("JuiceBox Remote");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setSecurityAuth(true, false, true);
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_YESNO);
   uint8_t keyMask = securityKeyMask();
   NimBLEDevice::setSecurityInitKey(keyMask);
   NimBLEDevice::setSecurityRespKey(keyMask);
