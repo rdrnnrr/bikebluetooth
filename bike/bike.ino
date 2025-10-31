@@ -148,6 +148,7 @@ void showReady(){ drawTopInfo(); drawBottomStatic("Ready"); }
 class TXCB : public NimBLECharacteristicCallbacks {
 public:
   void onSubscribe(NimBLECharacteristic* /*c*/, NimBLEConnInfo& /*ci*/, uint16_t subValue) override {
+    Serial.println("onSubscribe: " + String(subValue));
     uartSubscribed = (subValue != 0);
     if(uartSubscribed) {
       songRequestPending = true;
@@ -159,7 +160,6 @@ public:
       songRequestPending = false;
       uartBuffer = "";
       resetLegacyPacketCandidate();
-      NimBLEDevice::startAdvertising();
     }
   }
 };
@@ -341,25 +341,14 @@ void processLegacyPacketCandidate(uint32_t now) {
 }
 
 // ===== UART SERVICE =====
-void setupUartService() {
-  NimBLEServer* srv = NimBLEDevice::getServer();
-  if(!srv) {
-    srv = NimBLEDevice::createServer();
-  }
+void setupUartService(NimBLEServer* srv) {
   uartSvc = srv->createService(UART_SVC_UUID);
   uartRX = uartSvc->createCharacteristic(UART_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   uartTX = uartSvc->createCharacteristic(UART_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
   uartTX->setCallbacks(new TXCB());
   uartRX->setCallbacks(new RXCB());
   uartSvc->start();
-
-  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  if(adv) {
-    adv->addServiceUUID(UART_SVC_UUID);
-    if(!adv->isAdvertising()) {
-      adv->start();
-    }
-  }
+  Serial.println("UART service started");
 }
 
 void sendUartNotification(const String& message) {
@@ -381,9 +370,22 @@ void setup(){
   oledTop.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   oledBot.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
 
-  NimBLEDevice::init("JuiceBox Remote");
+  NimBLEDevice::init("");
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  NimBLEDevice::setSecurityAuth(false, false, true);
   bleKeyboard.begin();
-  setupUartService();
+  delay(50);
+  NimBLEServer* server = NimBLEDevice::getServer();
+  setupUartService(server);
+
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  adv->setName("JuiceBox Remote");
+  adv->setAppearance(0x0080);
+  adv->setPreferredParams(0x06, 0x12);
+  adv->addServiceUUID(NimBLEUUID((uint16_t)0x1812));
+  adv->addServiceUUID(UART_SVC_UUID);
+  adv->enableScanResponse(true);
+  adv->start();
 
   showBoot();
   calibrateCenter();
@@ -400,11 +402,11 @@ void loop(){
 
   bool kbConnected = bleKeyboard.isConnected();
   if(kbConnected != lastConnected) {
+    Serial.println("Connection state changed. Connected: " + String(kbConnected) + ", Advertising: " + String(NimBLEDevice::getAdvertising()->isAdvertising()));
     if(kbConnected) {
       songRequestPending = true;
     } else {
       songRequestPending = false;
-      NimBLEDevice::startAdvertising();
     }
     lastConnected = kbConnected;
   }
@@ -433,27 +435,32 @@ void loop(){
   smoothRead();
   bool btn = (digitalRead(JOY_SW_PIN) == LOW);
   if(btn && (now - tBtn > 280)){
+    Serial.println("Button pressed");
     tBtn = now; sendMedia(KEY_MEDIA_PLAY_PAUSE);
     drawBottomStatic("Play");
   }
 
   if(!inDZ(emaX) && beyond(emaX)){
-    if(emaX>0 && now-tR>ACTION_COOLDOWN){
-      sendMedia(KEY_MEDIA_NEXT_TRACK);
-      drawBottomStatic("Next ▶"); tR=now;
-    } else if(emaX<0 && now-tL>ACTION_COOLDOWN){
-      sendMedia(KEY_MEDIA_PREVIOUS_TRACK);
-      drawBottomStatic("◀ Prev"); tL=now;
+    if(emaX>0 && now-tUp>VOL_REPEAT_MS){
+      Serial.println("Joystick right");
+      sendMedia(KEY_MEDIA_VOLUME_UP);
+      drawBottomStatic("Vol +"); tUp=now;
+    } else if(emaX<0 && now-tDn>VOL_REPEAT_MS){
+      Serial.println("Joystick left");
+      sendMedia(KEY_MEDIA_VOLUME_DOWN);
+      drawBottomStatic("Vol -"); tDn=now;
     }
   }
 
   if(!inDZ(emaY) && beyond(emaY)){
-    if(emaY<0 && now-tUp>VOL_REPEAT_MS){
-      sendMedia(KEY_MEDIA_VOLUME_UP);
-      drawBottomStatic("Vol +"); tUp=now;
-    } else if(emaY>0 && now-tDn>VOL_REPEAT_MS){
-      sendMedia(KEY_MEDIA_VOLUME_DOWN);
-      drawBottomStatic("Vol -"); tDn=now;
+    if(emaY>0 && now-tR>ACTION_COOLDOWN){
+      Serial.println("Joystick down");
+      sendMedia(KEY_MEDIA_NEXT_TRACK);
+      drawBottomStatic("Next >"); tR=now;
+    } else if(emaY<0 && now-tL>ACTION_COOLDOWN){
+      Serial.println("Joystick up");
+      sendMedia(KEY_MEDIA_PREVIOUS_TRACK);
+      drawBottomStatic("< Prev"); tL=now;
     }
   }
 
