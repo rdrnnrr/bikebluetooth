@@ -290,9 +290,13 @@ class ClientCallbacks : public NimBLEClientCallbacks {
 
 class AdvertisedDeviceCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
+    Serial.print("Found device: ");
+    Serial.print(advertisedDevice->getAddress().toString().c_str());
+    Serial.print(", advertisement data: ");
+    Serial.println(advertisedDevice->toString().c_str());
     if(iosConnected) return;
 
-    if(advertisedDevice->isAdvertisingService(ANCS_SERVICE_UUID) || advertisedDevice->isAdvertisingService(AMS_SERVICE_UUID)) {
+    if(strcmp(advertisedDevice->getAddress().toString().c_str(), "cc:3f:36:cf:74:c7") == 0) {
       Serial.println("Found potential iOS device: " + String(advertisedDevice->getAddress().toString().c_str()));
       NimBLEDevice::getScan()->stop();
       NimBLEAdvertisedDevice* device = new NimBLEAdvertisedDevice(*advertisedDevice);
@@ -304,6 +308,10 @@ class AdvertisedDeviceCallbacks : public NimBLEScanCallbacks {
 
 static ClientCallbacks clientCallbacks;
 static AdvertisedDeviceCallbacks advertisedDeviceCallbacks;
+
+void scanEnded(NimBLEScanResults results) {
+  Serial.println("Scan ended");
+}
 
 void startScan() {
   if(!bleScanner) return;
