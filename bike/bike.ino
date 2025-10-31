@@ -296,7 +296,8 @@ class AdvertisedDeviceCallbacks : public NimBLEScanCallbacks {
     Serial.println(advertisedDevice->toString().c_str());
     if(iosConnected) return;
 
-    if(strcmp(advertisedDevice->getAddress().toString().c_str(), "cc:3f:36:cf:74:c7") == 0) {
+    std::string strAddress = advertisedDevice->getAddress().toString();
+    if(strAddress.rfind("cc:3f:36", 0) == 0) {
       Serial.println("Found potential iOS device: " + String(advertisedDevice->getAddress().toString().c_str()));
       NimBLEDevice::getScan()->stop();
       NimBLEAdvertisedDevice* device = new NimBLEAdvertisedDevice(*advertisedDevice);
@@ -683,7 +684,7 @@ void setup(){
   NimBLEDevice::init("JuiceBox Remote");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setSecurityAuth(true, false, true);
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
   uint8_t keyMask = securityKeyMask();
   NimBLEDevice::setSecurityInitKey(keyMask);
   NimBLEDevice::setSecurityRespKey(keyMask);
