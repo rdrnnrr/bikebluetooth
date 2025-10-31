@@ -459,22 +459,26 @@ void subscribeAmsAttributes() {
   if(!amsReady || !amsEntityUpdate || !amsEntityAttribute) return;
 
   // Request notifications for track attributes (title, artist, album)
-  uint8_t trackTitleReq[] = {0x02, 0x00, 0x80, 0x00};
-  uint8_t trackArtistReq[] = {0x02, 0x01, 0x80, 0x00};
-  uint8_t trackAlbumReq[] = {0x02, 0x02, 0x80, 0x00};
+  uint8_t trackTitleReq[] = {0x02, 0x00, 0x80};
+  uint8_t trackArtistReq[] = {0x02, 0x01, 0x80};
+  uint8_t trackAlbumReq[] = {0x02, 0x02, 0x80};
   amsEntityUpdate->writeValue(trackTitleReq, sizeof(trackTitleReq), false);
   amsEntityUpdate->writeValue(trackArtistReq, sizeof(trackArtistReq), false);
   amsEntityUpdate->writeValue(trackAlbumReq, sizeof(trackAlbumReq), false);
 
   // Request current values for the attributes we care about.
-  uint8_t attrRequests[][2] = {
-    {0x02, 0x00},
-    {0x02, 0x01},
-    {0x02, 0x02}
+  struct {
+    uint8_t attribute;
+    uint16_t maxLen;
+  } attrRequests[] = {
+    {0x00, 128},
+    {0x01, 128},
+    {0x02, 128}
   };
 
   for(auto& req : attrRequests) {
-    amsEntityAttribute->writeValue(req, sizeof(req), true);
+    uint8_t payload[] = {0x02, req.attribute, static_cast<uint8_t>(req.maxLen & 0xFF), static_cast<uint8_t>((req.maxLen >> 8) & 0xFF)};
+    amsEntityAttribute->writeValue(payload, sizeof(payload), true);
   }
 }
 
