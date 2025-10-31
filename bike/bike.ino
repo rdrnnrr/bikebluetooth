@@ -21,6 +21,21 @@ Adafruit_SSD1306 oledTop(128, 32, &WireTop, -1);
 Adafruit_SSD1306 oledBot(128, 32, &WireBot, -1);
 
 // ===== BLE CONSTANTS =====
+static uint8_t securityKeyMask() {
+  uint8_t mask = 0;
+#if defined(BLE_SM_PAIR_KEY_DIST_ENC)
+  mask |= BLE_SM_PAIR_KEY_DIST_ENC;
+#elif defined(BLE_ENC_KEY)
+  mask |= BLE_ENC_KEY;
+#endif
+#if defined(BLE_SM_PAIR_KEY_DIST_ID)
+  mask |= BLE_SM_PAIR_KEY_DIST_ID;
+#elif defined(BLE_ID_KEY)
+  mask |= BLE_ID_KEY;
+#endif
+  return mask;
+}
+
 static const NimBLEUUID ANCS_SERVICE_UUID("7905F431-B5CE-4E99-A40F-4B1E122D00D0");
 static const NimBLEUUID ANCS_NOTIFICATION_SOURCE_UUID("9FBF120D-6301-42D9-8C58-25E699A21DBD");
 static const NimBLEUUID ANCS_CONTROL_POINT_UUID("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9");
@@ -87,7 +102,7 @@ enum AmsRemoteCommand : uint8_t {
 // Forward declarations
 String cleanDisplayText(const String& input);
 void startScan();
-bool connectToAdvertisedDevice(NimBLEAdvertisedDevice* device);
+bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device);
 bool setupAncs(NimBLEClient* client);
 bool setupAms(NimBLEClient* client);
 void requestAncsAttributes(uint32_t uid);
@@ -251,7 +266,7 @@ void showStatus(const String& message, uint32_t durationMs) {
 }
 
 class ClientCallbacks : public NimBLEClientCallbacks {
-  void onDisconnect(NimBLEClient* /*client*/) override {
+  void onDisconnect(NimBLEClient* /*client*/, int /*reason*/) override {
     Serial.println("iOS device disconnected");
     iosConnected = false;
     ancsReady = false;
@@ -273,8 +288,8 @@ class ClientCallbacks : public NimBLEClientCallbacks {
   }
 };
 
-class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
-  void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
+class AdvertisedDeviceCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
     if(iosConnected) return;
 
     if(advertisedDevice->isAdvertisingService(ANCS_SERVICE_UUID) || advertisedDevice->isAdvertisingService(AMS_SERVICE_UUID)) {
@@ -296,7 +311,7 @@ void startScan() {
   if(iosClient && iosClient->isConnected()) return;
 
   Serial.println("Starting BLE scan for iOS devices...");
-  bleScanner->setAdvertisedDeviceCallbacks(&advertisedDeviceCallbacks, false);
+  bleScanner->setScanCallbacks(&advertisedDeviceCallbacks, false);
   bleScanner->setInterval(45);
   bleScanner->setWindow(30);
   bleScanner->setActiveScan(true);
@@ -388,7 +403,7 @@ bool setupAms(NimBLEClient* client) {
   return true;
 }
 
-bool connectToAdvertisedDevice(NimBLEAdvertisedDevice* device) {
+bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device) {
   if(!device) return false;
 
   Serial.println("Connecting to iOS device at " + String(device->getAddress().toString().c_str()));
@@ -661,11 +676,12 @@ void setup(){
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setSecurityAuth(true, false, true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
-  NimBLEDevice::setSecurityInitKey(BLE_ENC_KEY | BLE_ID_KEY);
-  NimBLEDevice::setSecurityRespKey(BLE_ENC_KEY | BLE_ID_KEY);
+  uint8_t keyMask = securityKeyMask();
+  NimBLEDevice::setSecurityInitKey(keyMask);
+  NimBLEDevice::setSecurityRespKey(keyMask);
 
   bleScanner = NimBLEDevice::getScan();
-  bleScanner->setAdvertisedDeviceCallbacks(&advertisedDeviceCallbacks, false);
+  bleScanner->setScanCallbacks(&advertisedDeviceCallbacks, false);
   bleScanner->setInterval(45);
   bleScanner->setWindow(30);
   bleScanner->setActiveScan(true);
