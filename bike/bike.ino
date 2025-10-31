@@ -5,6 +5,7 @@
 #include <math.h>
 #include <string>
 #include <limits.h>
+#include <cstring>
 
 // ===== PINS =====
 #define JOY_X_PIN 34
@@ -62,6 +63,10 @@ NimBLERemoteCharacteristic* amsEntityAttribute = nullptr;
 bool iosConnected = false;
 bool ancsReady = false;
 bool amsReady = false;
+
+// Optional hint for the advertised iOS device name to prioritize/accept.
+// Adjust this string to match your phone's Bluetooth name if discovery fails.
+const char* IOS_NAME_HINT = "Dennis's iPhone";
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -490,6 +495,15 @@ bool looksLikeIosDevice(const NimBLEAdvertisedDevice* device) {
     String lowered = name;
     lowered.toLowerCase();
 
+    if(strlen(IOS_NAME_HINT) > 0) {
+      String hint = String(IOS_NAME_HINT);
+      hint.toLowerCase();
+      if(lowered == hint) {
+        logDevice("Matches preferred name");
+        return true;
+      }
+    }
+
     if(lowered.indexOf("watch") >= 0 || lowered.indexOf("airpods") >= 0 || lowered.indexOf("homepod") >= 0 || lowered.indexOf("pencil") >= 0) {
       blockedByName = true;
     }
@@ -512,26 +526,19 @@ bool looksLikeIosDevice(const NimBLEAdvertisedDevice* device) {
       if(looksApple) {
         uint8_t advType = manufacturer.length() >= 3 ? data[2] : 0xFF;
 
-        static const uint8_t BLOCKED_ADV_TYPES[] = {0x0C, 0x0D, 0x0E, 0x0F, 0x10};
-        bool blockedType = false;
-        for(uint8_t t : BLOCKED_ADV_TYPES) {
-          if(t == advType) {
-            blockedType = true;
-            break;
-          }
-        }
-
-        if(blockedByName && blockedType) {
-          logDevice("Ignoring Apple accessory by name/type", advType);
+        if(blockedByName) {
+          logDevice("Ignoring Apple accessory by name", advType);
           return false;
         }
 
-        if(!blockedType || advType == 0x07 || advType == 0x1F || advType == 0x12) {
-          logDevice("Matches Apple manufacturer data", advType);
-          return true;
-        }
+        logDevice("Matches Apple manufacturer data", advType);
+        return true;
       }
     }
+  }
+
+  if(device->haveName()) {
+    logDevice("Skipping device without Apple indicators");
   }
 
   return false;
