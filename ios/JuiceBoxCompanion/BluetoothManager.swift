@@ -26,6 +26,7 @@ final class BluetoothManager: NSObject, ObservableObject {
     private let rxUUID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
     private let txUUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
     private let deviceNameKeyword = "juicebox"
+    private let deviceNameFallbackKeyword = "juice"
     private let centralRestoreIdentifier = "com.juicebox.remote.central"
     private let knownPeripheralKey = "BluetoothManager.knownPeripheral"
 
@@ -40,19 +41,34 @@ final class BluetoothManager: NSObject, ObservableObject {
     private var pendingConnection: CBPeripheral?
     private var scanFallbackWorkItem: DispatchWorkItem?
     private var pendingServiceDiscovery = false
+    private var hasForcedDiscoveryAfterPowerOn = false
 
-    // Scan state/coalescing
+    // Progress tracking
+    private var servicesDiscovered = false
+    private var anyCharacteristicFound = false
+
+    // Scan state
     private var isScanning = false
     private var lastScanStartTime: TimeInterval = 0
     private let minScanRestartInterval: TimeInterval = 1.0
 
-    // Send throttling/debounce
+    // Send debounce
     private var pendingSendPayload: SongPayload?
     private var pendingSendForce: Bool = false
     private var sendDebounceWorkItem: DispatchWorkItem?
     private var lastSendTime: TimeInterval = 0
     private let minSendInterval: TimeInterval = 0.5
     private let sendDebounceDelay: TimeInterval = 0.2
+
+    // Watchdog (epoch-guarded)
+    private var connectionWatchdog: DispatchWorkItem?
+    private let connectionTimeout: TimeInterval = 18.0
+    private var consecutiveWatchdogTimeouts = 0
+    private let maxWatchdogTimeoutsBeforeClearingKnown = 2
+    private var connectionEpoch: Int = 0
+
+    // Guard to allow reset right after an intentional cancel
+    private var allowResetWhileConnectedOnce = false
 
     init(preview: Bool = false) {
         super.init()
@@ -83,7 +99,6 @@ final class BluetoothManager: NSObject, ObservableObject {
             return
         }
 
-        // Avoid rapid duplicate scan starts
         let now = CACurrentMediaTime()
         if isScanning && (now - lastScanStartTime) < minScanRestartInterval {
             return
@@ -146,26 +161,20 @@ final class BluetoothManager: NSObject, ObservableObject {
 
     func disconnect() {
         if let peripheral = discoveredPeripheral {
+            allowResetWhileConnectedOnce = true
             central.cancelPeripheralConnection(peripheral)
         }
-        resetState()
+        resetState(reason: "user-disconnect")
         startScanning()
     }
 
-    // Public API stays the same; internally route through debounced/throttled sender
     func send(song: SongPayload, force: Bool = false) {
         guard canSend else { return }
+        if !force && song.formatted == lastSentPayload.formatted { return }
 
-        // Avoid spamming identical payloads unless forced
-        if !force && song.formatted == lastSentPayload.formatted {
-            return
-        }
-
-        // Coalesce pending payloads; latest wins, force if any caller forces
         pendingSendPayload = song
         pendingSendForce = pendingSendForce || force
 
-        // Debounce multiple send requests quickly arriving
         sendDebounceWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             self?.performThrottledSend()
@@ -179,8 +188,6 @@ final class BluetoothManager: NSObject, ObservableObject {
 
         let now = CACurrentMediaTime()
         let force = pendingSendForce
-
-        // Respect min interval unless explicitly forced
         if !force && (now - lastSendTime) < minSendInterval {
             let remaining = minSendInterval - (now - lastSendTime)
             sendDebounceWorkItem?.cancel()
@@ -192,7 +199,6 @@ final class BluetoothManager: NSObject, ObservableObject {
             return
         }
 
-        // Clear pending state before actual write
         pendingSendPayload = nil
         pendingSendForce = false
         lastSendTime = now
@@ -212,7 +218,23 @@ final class BluetoothManager: NSObject, ObservableObject {
         lastSentPayload = payload
     }
 
-    private func resetState() {
+    private func resetState(reason: String = "unspecified") {
+        let stateDesc: String
+        if let p = discoveredPeripheral {
+            stateDesc = "peripheral.state=\(p.state.rawValue)"
+        } else {
+            stateDesc = "peripheral.state=<nil>"
+        }
+
+        // Prevent accidental reset while connected/connecting unless explicitly allowed
+        if let p = discoveredPeripheral,
+           (p.state == .connected || p.state == .connecting),
+           !allowResetWhileConnectedOnce {
+            print("DEBUG: Suppressed reset while connected — reason=\(reason) \(stateDesc) epoch=\(connectionEpoch)")
+            return
+        }
+        allowResetWhileConnectedOnce = false
+
         isConnected = false
         txCharacteristic = nil
         rxCharacteristic = nil
@@ -222,18 +244,24 @@ final class BluetoothManager: NSObject, ObservableObject {
         errorMessage = nil
         scanFallbackWorkItem?.cancel()
         scanFallbackWorkItem = nil
+        pendingServiceDiscovery = false
+        hasForcedDiscoveryAfterPowerOn = false
+        servicesDiscovered = false
+        anyCharacteristicFound = false
+        consecutiveWatchdogTimeouts = 0
 
-        // Clear pending send state
         pendingSendPayload = nil
         pendingSendForce = false
         sendDebounceWorkItem?.cancel()
         sendDebounceWorkItem = nil
         lastSendTime = 0
 
-        // Scan state
+        connectionWatchdog?.cancel()
+        connectionWatchdog = nil
+
         stopScan()
 
-        print("DEBUG: Reset Bluetooth state")
+        print("DEBUG: Reset Bluetooth state — reason=\(reason) \(stateDesc) epoch=\(connectionEpoch)")
     }
 
     private func attemptRestoreKnownPeripheral() {
@@ -277,8 +305,8 @@ final class BluetoothManager: NSObject, ObservableObject {
             if peripheral.state == .connected {
                 isConnected = true
                 connectionDescription = "Connected"
+                print("DEBUG: Found already-connected peripheral \(peripheral.identifier) — discovering services")
                 peripheral.discoverServices([serviceUUID])
-                print("DEBUG: Found already-connected peripheral \(peripheral.identifier)")
             } else {
                 connectionDescription = "Reconnecting…"
                 isBusy = true
@@ -315,19 +343,22 @@ final class BluetoothManager: NSObject, ObservableObject {
     private func isTargetPeripheral(_ peripheral: CBPeripheral, advertisementData: [String: Any] = [:]) -> Bool {
         let candidates = updateLastSeenNames(for: peripheral, advertisementData: advertisementData)
 
-        // 1) Always accept by stored identifier (previously paired device)
         if let storedIdentifier = UserDefaults.standard.string(forKey: knownPeripheralKey),
            peripheral.identifier.uuidString == storedIdentifier {
             return true
         }
 
-        // 2) Prefer name-based matching — accept if any candidate contains "juicebox"
         if candidates.contains(where: { $0.contains(deviceNameKeyword) }) {
             print("DEBUG: Name match for \(peripheral.identifier) candidates=\(candidates)")
             return true
         }
 
-        // 3) Fallback to service list if present in advertisement (not required for name match)
+        if UserDefaults.standard.string(forKey: knownPeripheralKey) == nil,
+           candidates.contains(where: { $0.contains(deviceNameFallbackKeyword) }) {
+            print("DEBUG: Fallback name match for \(peripheral.identifier) candidates=\(candidates)")
+            return true
+        }
+
         let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
         let overflowServices = advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? []
         let includesService = advertisedServices.contains(serviceUUID) || overflowServices.contains(serviceUUID)
@@ -336,10 +367,11 @@ final class BluetoothManager: NSObject, ObservableObject {
             return true
         }
 
-        // Debug log for diagnostics when we skip a device
         #if DEBUG
         let localName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? "<nil>"
-        print("DEBUG: Skipping peripheral \(peripheral.identifier) name=\(localName) candidates=\(candidates) advServices=\(advertisedServices)")
+        let serviceDataKeys = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?.keys.map { $0.uuidString } ?? []
+        let manufacturerData = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.count ?? 0
+        print("DEBUG: Skipping peripheral \(peripheral.identifier) name=\(localName) candidates=\(candidates) advServices=\(advertisedServices) overflow=\(overflowServices) serviceDataKeys=\(serviceDataKeys) mfgBytes=\(manufacturerData)")
         #endif
 
         return false
@@ -349,10 +381,8 @@ final class BluetoothManager: NSObject, ObservableObject {
     private func updateLastSeenNames(for peripheral: CBPeripheral, advertisementData: [String: Any]) -> [String] {
         var candidates = lastSeenPeripheralNames[peripheral.identifier] ?? []
 
-        if let name = peripheral.name?.lowercased(), !name.isEmpty {
-            if !candidates.contains(name) {
-                candidates.append(name)
-            }
+        if let name = peripheral.name?.lowercased(), !name.isEmpty, !candidates.contains(name) {
+            candidates.append(name)
         }
 
         if let advertisedName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)?.lowercased(),
@@ -375,12 +405,11 @@ final class BluetoothManager: NSObject, ObservableObject {
         }
 
         var candidates = lastSeenPeripheralNames[peripheral.identifier] ?? []
-
         if let currentName = peripheral.name?.lowercased(), !currentName.isEmpty {
             candidates.append(currentName)
         }
 
-        let match = candidates.contains { $0.contains(deviceNameKeyword) }
+        let match = candidates.contains { $0.contains(deviceNameKeyword) || $0.contains(deviceNameFallbackKeyword) }
         if match {
             print("DEBUG: Name match for \(peripheral.identifier) candidates=\(candidates)")
         }
@@ -404,20 +433,91 @@ private extension BluetoothManager {
         central.stopScan()
         isScanning = false
     }
+
+    func scheduleWatchdog(for peripheral: CBPeripheral) {
+        let epoch = connectionEpoch
+        connectionWatchdog?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if epoch != self.connectionEpoch {
+                print("DEBUG: Watchdog aborted due to epoch change (scheduled=\(epoch), current=\(self.connectionEpoch))")
+                return
+            }
+
+            if self.txCharacteristic != nil && self.rxCharacteristic != nil {
+                self.consecutiveWatchdogTimeouts = 0
+                return
+            }
+
+            if self.servicesDiscovered || self.anyCharacteristicFound {
+                self.consecutiveWatchdogTimeouts += 1
+                print("DEBUG: Watchdog saw progress but not complete (timeouts=\(self.consecutiveWatchdogTimeouts), epoch=\(epoch)) — rescheduling")
+                self.scheduleWatchdog(for: peripheral)
+                return
+            }
+
+            let state = peripheral.state
+            print("DEBUG: Watchdog fired. state=\(state.rawValue) servicesDiscovered=\(self.servicesDiscovered) anyCharacteristicFound=\(self.anyCharacteristicFound) timeouts=\(self.consecutiveWatchdogTimeouts) epoch=\(epoch)")
+
+            if state == .connected {
+                if self.consecutiveWatchdogTimeouts == 0 {
+                    self.consecutiveWatchdogTimeouts = 1
+                    self.connectionDescription = "Discovering services…"
+                    print("DEBUG: Watchdog stage 1 — reissuing discoverServices for \(peripheral.identifier)")
+                    peripheral.discoverServices([self.serviceUUID])
+                    self.scheduleWatchdog(for: peripheral)
+                    return
+                }
+            }
+
+            self.consecutiveWatchdogTimeouts += 1
+            print("DEBUG: Watchdog escalation — canceling connection (timeouts=\(self.consecutiveWatchdogTimeouts), epoch=\(epoch))")
+            if self.central.state == .poweredOn {
+                if peripheral.state == .connected || peripheral.state == .connecting {
+                    self.allowResetWhileConnectedOnce = true
+                    self.central.cancelPeripheralConnection(peripheral)
+                }
+                if self.consecutiveWatchdogTimeouts >= self.maxWatchdogTimeoutsBeforeClearingKnown {
+                    if let stored = UserDefaults.standard.string(forKey: self.knownPeripheralKey) {
+                        print("DEBUG: Clearing stale known peripheral \(stored) after \(self.consecutiveWatchdogTimeouts) timeouts")
+                        UserDefaults.standard.removeObject(forKey: self.knownPeripheralKey)
+                    }
+                }
+            }
+        }
+
+        connectionWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + connectionTimeout, execute: work)
+    }
+
+    func cancelConnectionWatchdog() {
+        connectionWatchdog?.cancel()
+        connectionWatchdog = nil
+        consecutiveWatchdogTimeouts = 0
+    }
 }
 
 extension BluetoothManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
-            // If we deferred service discovery during restoration, do it now.
-            if pendingServiceDiscovery,
-               let peripheral = discoveredPeripheral,
-               peripheral.state == .connected {
+            if pendingServiceDiscovery, let peripheral = discoveredPeripheral {
                 pendingServiceDiscovery = false
+                hasForcedDiscoveryAfterPowerOn = true
                 connectionDescription = "Discovering services…"
                 print("DEBUG: Resuming deferred service discovery for \(peripheral.identifier)")
                 peripheral.discoverServices([serviceUUID])
+            } else if let peripheral = discoveredPeripheral, isConnected, !hasForcedDiscoveryAfterPowerOn {
+                hasForcedDiscoveryAfterPowerOn = true
+                connectionDescription = "Discovering services…"
+                print("DEBUG: Powered on: forcing service discovery for \(peripheral.identifier)")
+                peripheral.discoverServices([serviceUUID])
+            } else if let peripheral = discoveredPeripheral, peripheral.state == .disconnected {
+                print("DEBUG: Powered on: reconnecting restored peripheral \(peripheral.identifier)")
+                central.connect(peripheral, options: nil)
+                isBusy = true
+                connectionDescription = "Reconnecting…"
             }
 
             if let pendingConnection {
@@ -429,20 +529,25 @@ extension BluetoothManager: CBCentralManagerDelegate {
             } else if pendingScanRequest || !isConnected {
                 startScanning()
             }
+
             attemptRestoreKnownPeripheral()
             attemptRetrieveConnectedPeripheral()
+
         case .poweredOff:
             connectionDescription = "Turn on Bluetooth"
             errorMessage = nil
             stopScan()
+
         case .unauthorized:
             connectionDescription = "Bluetooth access denied"
             errorMessage = "Enable Bluetooth permissions in Settings"
             stopScan()
+
         case .unsupported:
             connectionDescription = "Bluetooth unsupported"
             errorMessage = "This device cannot connect to the remote"
             stopScan()
+
         default:
             connectionDescription = "Bluetooth unavailable"
             errorMessage = nil
@@ -451,6 +556,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
+        #if DEBUG
+        let localName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? "<nil>"
+        print("DEBUG: Discovered peripheral \(peripheral.identifier) name=\(localName) rssi=\(RSSI)")
+        #endif
+
         guard isTargetPeripheral(peripheral, advertisementData: advertisementData) else { return }
         discoveredPeripheral = peripheral
         guard central.state == .poweredOn else {
@@ -466,20 +576,29 @@ extension BluetoothManager: CBCentralManagerDelegate {
         scanFallbackWorkItem?.cancel()
         scanFallbackWorkItem = nil
         pendingConnection = nil
+        servicesDiscovered = false
+        anyCharacteristicFound = false
+
+        connectionEpoch &+= 1
         central.connect(peripheral, options: nil)
         isBusy = true
         connectionDescription = "Connecting…"
         errorMessage = nil
-        print("DEBUG: Discovered and connecting to \(peripheral.identifier) name=\(peripheral.name ?? "<nil>")")
+        print("DEBUG: Discovered and connecting to \(peripheral.identifier) name=\(peripheral.name ?? "<nil>") epoch=\(connectionEpoch)")
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         pendingConnection = nil
         discoveredPeripheral = peripheral
         peripheral.delegate = self
+        servicesDiscovered = false
+        anyCharacteristicFound = false
         connectionDescription = "Discovering services…"
+        print("DEBUG: Connected to \(peripheral.identifier) epoch=\(connectionEpoch)")
+
+        cancelConnectionWatchdog()
+        scheduleWatchdog(for: peripheral)
         peripheral.discoverServices([serviceUUID])
-        print("DEBUG: Connected to \(peripheral.identifier)")
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -492,7 +611,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        resetState()
+        cancelConnectionWatchdog()
+        resetState(reason: "didDisconnectPeripheral")
         connectionDescription = "Disconnected"
         isBusy = false
         if let error = error {
@@ -509,38 +629,42 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 scanFallbackWorkItem = nil
                 discoveredPeripheral = peripheral
                 peripheral.delegate = self
+                servicesDiscovered = false
+                anyCharacteristicFound = false
+                connectionEpoch &+= 1
+
                 if peripheral.state == .connected {
                     isConnected = true
                     connectionDescription = "Connected"
-                    // If we can't safely discover yet, defer until poweredOn.
                     if central.state == .poweredOn {
                         connectionDescription = "Discovering services…"
                         peripheral.discoverServices([serviceUUID])
-                        print("DEBUG: Will restore connected peripheral \(peripheral.identifier) and discover services")
+                        print("DEBUG: Will restore connected peripheral \(peripheral.identifier) and discover services epoch=\(connectionEpoch)")
+                        cancelConnectionWatchdog()
+                        scheduleWatchdog(for: peripheral)
                     } else {
                         pendingServiceDiscovery = true
-                        print("DEBUG: Will restore connected peripheral \(peripheral.identifier) (defer service discovery)")
+                        print("DEBUG: Will restore connected peripheral \(peripheral.identifier) (defer service discovery) epoch=\(connectionEpoch)")
                     }
                 } else if peripheral.state == .connecting {
                     connectionDescription = "Reconnecting…"
                     isBusy = true
-                    print("DEBUG: Will restore connecting peripheral \(peripheral.identifier)")
+                    print("DEBUG: Will restore connecting peripheral \(peripheral.identifier) epoch=\(connectionEpoch)")
                 } else if central.state == .poweredOn {
                     central.connect(peripheral, options: nil)
                     isBusy = true
-                    print("DEBUG: Will restore and connect \(peripheral.identifier)")
+                    print("DEBUG: Will restore and connect \(peripheral.identifier) epoch=\(connectionEpoch)")
                 } else {
                     pendingConnection = peripheral
                     pendingScanRequest = true
                     connectionDescription = "Waiting for Bluetooth…"
                     isBusy = true
-                    print("DEBUG: Will restore and queue \(peripheral.identifier)")
+                    print("DEBUG: Will restore and queue \(peripheral.identifier) epoch=\(connectionEpoch)")
                 }
                 break
             }
         }
 
-        // If the system indicates scanning state, request a scan after power-on instead of starting immediately.
         if discoveredPeripheral == nil,
            let scannedServices = dict[CBCentralManagerRestoredStateScanServicesKey] as? [CBUUID],
            !scannedServices.isEmpty {
@@ -558,9 +682,26 @@ extension BluetoothManager: CBPeripheralDelegate {
             print("DEBUG: Discover services error=\(error.localizedDescription)")
             return
         }
-        guard let services = peripheral.services else { return }
-        for service in services where service.uuid == serviceUUID {
-            peripheral.discoverCharacteristics([txUUID, rxUUID], for: service)
+        guard let services = peripheral.services, !services.isEmpty else {
+            print("DEBUG: Discover services returned no services")
+            return
+        }
+
+        servicesDiscovered = true
+
+        let serviceUUIDs = services.map { $0.uuid.uuidString }
+        print("DEBUG: Discovered services: \(serviceUUIDs) epoch=\(connectionEpoch)")
+
+        cancelConnectionWatchdog()
+        scheduleWatchdog(for: peripheral)
+
+        if let uartService = services.first(where: { $0.uuid == serviceUUID }) {
+            peripheral.discoverCharacteristics([txUUID, rxUUID], for: uartService)
+        } else {
+            print("DEBUG: UART service not found in initial list; discovering characteristics on all services for inspection")
+            for service in services {
+                peripheral.discoverCharacteristics(nil, for: service)
+            }
         }
     }
 
@@ -568,26 +709,44 @@ extension BluetoothManager: CBPeripheralDelegate {
         if let error = error {
             errorMessage = error.localizedDescription
             isBusy = false
-            print("DEBUG: Discover characteristics error=\(error.localizedDescription)")
+            print("DEBUG: Discover characteristics error for service \(service.uuid.uuidString)=\(error.localizedDescription)")
             return
         }
-        guard let characteristics = service.characteristics else { return }
+        guard let characteristics = service.characteristics, !characteristics.isEmpty else {
+            print("DEBUG: No characteristics for service \(service.uuid.uuidString)")
+            return
+        }
+
+        let charUUIDs = characteristics.map { $0.uuid.uuidString }
+        print("DEBUG: Service \(service.uuid.uuidString) characteristics: \(charUUIDs) epoch=\(connectionEpoch)")
+
         for characteristic in characteristics {
             switch characteristic.uuid {
             case txUUID:
                 txCharacteristic = characteristic
+                anyCharacteristicFound = true
                 peripheral.setNotifyValue(true, for: characteristic)
+                print("DEBUG: Set notify on TX characteristic")
             case rxUUID:
                 rxCharacteristic = characteristic
+                anyCharacteristicFound = true
+                print("DEBUG: Found RX characteristic")
             default:
                 break
             }
         }
+
         let hadConnection = isConnected
         isConnected = txCharacteristic != nil && rxCharacteristic != nil
+
+        cancelConnectionWatchdog()
+        if !isConnected {
+            scheduleWatchdog(for: peripheral)
+        }
+
         isBusy = false
-        connectionDescription = isConnected ? "Connected" : "Missing UART characteristic"
-        print("DEBUG: Characteristics set tx=\(txCharacteristic != nil) rx=\(rxCharacteristic != nil)")
+        connectionDescription = isConnected ? "Connected" : "Discovering characteristics…"
+        print("DEBUG: Characteristics set tx=\(txCharacteristic != nil) rx=\(rxCharacteristic != nil) epoch=\(connectionEpoch)")
 
         if isConnected && !hadConnection && shouldPersistPeripheral(peripheral) {
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: knownPeripheralKey)
@@ -613,11 +772,9 @@ private extension BluetoothManager {
     func handleIncoming(message: String, from peripheral: CBPeripheral) {
         switch message {
         case "ACK":
-            // Remote acknowledged the most recent payload; nothing else to do.
             break
         case "REQ|SONG":
             if lastSentPayload != .empty {
-                // Force to bypass throttle so the remote gets the payload promptly on request.
                 send(song: lastSentPayload, force: true)
             }
             if shouldPersistPeripheral(peripheral) {
@@ -635,7 +792,6 @@ private extension BluetoothManager {
            storedIdentifier == peripheral.identifier.uuidString {
             return true
         }
-
         return hasExpectedName(for: peripheral)
     }
 }
