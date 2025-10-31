@@ -1,8 +1,8 @@
-#include <BleKeyboard.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <NimBLEDevice.h>
+#include <math.h>
 
 // ===== PINS =====
 #define JOY_X_PIN 34
@@ -20,29 +20,31 @@ TwoWire WireBot = TwoWire(1);
 Adafruit_SSD1306 oledTop(128, 32, &WireTop, -1);
 Adafruit_SSD1306 oledBot(128, 32, &WireBot, -1);
 
-// ===== BLE OBJECTS =====
-BleKeyboard bleKeyboard("JuiceBox Remote", "JuiceBox", 100);
-static const char* UART_SVC_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
-static const char* UART_RX_UUID  = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
-static const char* UART_TX_UUID  = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
+// ===== BLE CONSTANTS =====
+static const NimBLEUUID ANCS_SERVICE_UUID("7905F431-B5CE-4E99-A40F-4B1E122D00D0");
+static const NimBLEUUID ANCS_NOTIFICATION_SOURCE_UUID("9FBF120D-6301-42D9-8C58-25E699A21DBD");
+static const NimBLEUUID ANCS_CONTROL_POINT_UUID("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9");
+static const NimBLEUUID ANCS_DATA_SOURCE_UUID("22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB");
 
-NimBLEService* uartSvc = nullptr;
-NimBLECharacteristic* uartRX = nullptr;
-NimBLECharacteristic* uartTX = nullptr;
-String uartBuffer = "";
-// Delay before treating buffered data as a newline-free legacy packet.
-const uint32_t LEGACY_PACKET_GRACE_MS = 800;
-String legacyPacketCandidate = "";
-uint32_t legacyPacketTimestamp = 0;
-int legacyPacketStart = -1;
-int legacyPacketEnd = -1;
+static const NimBLEUUID AMS_SERVICE_UUID("89D3502B-0F36-433A-8EF4-C502AD55F8DC");
+static const NimBLEUUID AMS_REMOTE_COMMAND_UUID("9B3C81D8-57B1-4510-8A45-A1EFD60B605A");
+static const NimBLEUUID AMS_ENTITY_UPDATE_UUID("2F7CABCE-808D-411F-9A0C-BB92BA96C102");
+static const NimBLEUUID AMS_ENTITY_ATTRIBUTE_UUID("C6B2F38C-23AB-46D8-A6AB-A3A870B5A1D6");
 
-inline void resetLegacyPacketCandidate() {
-  legacyPacketCandidate = "";
-  legacyPacketTimestamp = 0;
-  legacyPacketStart = -1;
-  legacyPacketEnd = -1;
-}
+NimBLEScan* bleScanner = nullptr;
+NimBLEClient* iosClient = nullptr;
+
+NimBLERemoteCharacteristic* ancsNotificationSource = nullptr;
+NimBLERemoteCharacteristic* ancsControlPoint = nullptr;
+NimBLERemoteCharacteristic* ancsDataSource = nullptr;
+
+NimBLERemoteCharacteristic* amsRemoteCommand = nullptr;
+NimBLERemoteCharacteristic* amsEntityUpdate = nullptr;
+NimBLERemoteCharacteristic* amsEntityAttribute = nullptr;
+
+bool iosConnected = false;
+bool ancsReady = false;
+bool amsReady = false;
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -55,21 +57,49 @@ int midX = 2048, midY = 2048;
 uint32_t tUp=0, tDn=0, tL=0, tR=0, tBtn=0;
 
 // ===== STATE =====
-bool lastConnected = false;
 String artist = "";
 String album = "";
 String song = "";
+
+String notificationApp = "";
+String notificationTitle = "";
+String notificationMessage = "";
+uint32_t notificationExpiry = 0;
+uint32_t statusExpiry = 0;
 uint32_t lastConnectAttempt = 0;
 uint32_t lastScroll = 0;
 int scrollOffset = 0;
-bool songRequestPending = false;
-bool uartSubscribed = false;
+bool notificationActive = false;
+bool statusActive = false;
+uint32_t currentNotificationUid = 0;
+uint8_t currentNotificationCategory = 0;
+
+enum AmsRemoteCommand : uint8_t {
+  AMS_CMD_PLAY = 0x00,
+  AMS_CMD_PAUSE = 0x01,
+  AMS_CMD_TOGGLE_PLAY_PAUSE = 0x02,
+  AMS_CMD_NEXT_TRACK = 0x03,
+  AMS_CMD_PREVIOUS_TRACK = 0x04,
+  AMS_CMD_VOLUME_UP = 0x05,
+  AMS_CMD_VOLUME_DOWN = 0x06
+};
 
 // Forward declarations
-void sendUartNotification(const String& message);
-void handleUartMessage(const String& message);
 String cleanDisplayText(const String& input);
-void processLegacyPacketCandidate(uint32_t now);
+void startScan();
+bool connectToAdvertisedDevice(NimBLEAdvertisedDevice* device);
+bool setupAncs(NimBLEClient* client);
+bool setupAms(NimBLEClient* client);
+void requestAncsAttributes(uint32_t uid);
+void handleAncsNotification(const uint8_t* data, size_t length);
+void handleAncsData(const uint8_t* data, size_t length);
+void handleAmsEntityUpdate(const uint8_t* data, size_t length);
+void subscribeAmsAttributes();
+void showNotification(const String& title, const String& message, const String& appName, uint32_t durationMs = 12000);
+void clearNotification();
+void drawBottomMessage(const String& line1, const String& line2);
+void showStatus(const String& message, uint32_t durationMs = 1500);
+void sendAmsCommand(uint8_t commandId);
 
 // ===== HELPERS =====
 inline bool inDZ(float v){ return fabs(v) < DEADZONE; }
@@ -88,10 +118,9 @@ void smoothRead(){
   emaY=(1.0f-EMA_ALPHA)*emaY + EMA_ALPHA*(ry-midY);
 }
 
-void sendMedia(const uint8_t* key){ if(bleKeyboard.isConnected()) bleKeyboard.write(key); }
-
 // ===== DISPLAY =====
 void drawTopInfo() {
+  if(notificationActive) return;
   oledTop.clearDisplay();
   oledTop.setTextColor(SSD1306_WHITE);
   oledTop.setTextSize(1);
@@ -114,7 +143,19 @@ void drawBottomStatic(const char* txt) {
   oledBot.display();
 }
 
+void drawBottomMessage(const String& line1, const String& line2) {
+  oledBot.clearDisplay();
+  oledBot.setTextColor(SSD1306_WHITE);
+  oledBot.setTextSize(1);
+  oledBot.setCursor(0, 0);
+  oledBot.println(line1);
+  oledBot.setCursor(0, 16);
+  oledBot.println(line2);
+  oledBot.display();
+}
+
 void drawBottomScroll() {
+  if(notificationActive || statusActive) return;
   oledBot.clearDisplay();
   oledBot.setTextColor(SSD1306_WHITE);
   oledBot.setTextSize(2);
@@ -144,26 +185,422 @@ void drawBottomScroll() {
 void showBoot(){ oledTop.clearDisplay(); oledBot.clearDisplay(); drawBottomStatic("Booting"); }
 void showReady(){ drawTopInfo(); drawBottomStatic("Ready"); }
 
-// ===== UART CALLBACK =====
-class TXCB : public NimBLECharacteristicCallbacks {
-public:
-  void onSubscribe(NimBLECharacteristic* /*c*/, NimBLEConnInfo& /*ci*/, uint16_t subValue) override {
-    Serial.println("onSubscribe: " + String(subValue));
-    uartSubscribed = (subValue != 0);
-    if(uartSubscribed) {
-      songRequestPending = true;
-      if(song.length() == 0) {
-        // ensure we clear any stale scroll state before the app pushes data
-        scrollOffset = 0;
-      }
-    } else {
-      songRequestPending = false;
-      uartBuffer = "";
-      resetLegacyPacketCandidate();
+void showNotification(const String& title, const String& message, const String& appName, uint32_t durationMs) {
+  notificationTitle = cleanDisplayText(title);
+  notificationMessage = cleanDisplayText(message);
+  notificationApp = cleanDisplayText(appName);
+  notificationActive = true;
+  notificationExpiry = durationMs ? millis() + durationMs : 0;
+
+  oledTop.clearDisplay();
+  oledTop.setTextColor(SSD1306_WHITE);
+  oledTop.setTextSize(1);
+  oledTop.setCursor(0, 0);
+  if(notificationApp.length()) {
+    oledTop.println(notificationApp);
+  } else {
+    oledTop.println("Notification");
+  }
+
+  String secondLine = notificationTitle.length() ? notificationTitle : "";
+  if(secondLine.length() > 20) {
+    secondLine = secondLine.substring(0, 20);
+  }
+  oledTop.setCursor(0, 16);
+  oledTop.println(secondLine);
+  oledTop.display();
+
+  String line1;
+  String line2;
+  if(notificationMessage.length() <= 21) {
+    line1 = notificationMessage;
+    line2 = "";
+  } else {
+    line1 = notificationMessage.substring(0, 21);
+    uint16_t endIndex = notificationMessage.length() > 42 ? 42 : notificationMessage.length();
+    line2 = notificationMessage.substring(21, endIndex);
+  }
+  drawBottomMessage(line1, line2);
+  statusActive = false;
+}
+
+void clearNotification() {
+  notificationActive = false;
+  notificationExpiry = 0;
+  notificationApp = "";
+  notificationTitle = "";
+  notificationMessage = "";
+  drawTopInfo();
+  if(song.length()) {
+    drawBottomScroll();
+  } else if(!statusActive) {
+    drawBottomStatic("Ready");
+  }
+}
+
+void showStatus(const String& message, uint32_t durationMs) {
+  if(notificationActive) return;
+  String cleaned = cleanDisplayText(message);
+  drawBottomStatic(cleaned.c_str());
+  statusActive = true;
+  if(durationMs == 0) {
+    statusExpiry = 0;
+  } else {
+    statusExpiry = millis() + durationMs;
+  }
+}
+
+class ClientCallbacks : public NimBLEClientCallbacks {
+  void onDisconnect(NimBLEClient* /*client*/) override {
+    Serial.println("iOS device disconnected");
+    iosConnected = false;
+    ancsReady = false;
+    amsReady = false;
+    ancsNotificationSource = nullptr;
+    ancsControlPoint = nullptr;
+    ancsDataSource = nullptr;
+    amsRemoteCommand = nullptr;
+    amsEntityUpdate = nullptr;
+    amsEntityAttribute = nullptr;
+    song = "";
+    artist = "";
+    album = "";
+    notificationActive = false;
+    statusActive = false;
+    drawTopInfo();
+    drawBottomStatic("Disconnected");
+    startScan();
+  }
+};
+
+class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
+  void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
+    if(iosConnected) return;
+
+    if(advertisedDevice->isAdvertisingService(ANCS_SERVICE_UUID) || advertisedDevice->isAdvertisingService(AMS_SERVICE_UUID)) {
+      Serial.println("Found potential iOS device: " + String(advertisedDevice->getAddress().toString().c_str()));
+      NimBLEDevice::getScan()->stop();
+      NimBLEAdvertisedDevice* device = new NimBLEAdvertisedDevice(*advertisedDevice);
+      connectToAdvertisedDevice(device);
+      delete device;
     }
   }
 };
 
+static ClientCallbacks clientCallbacks;
+static AdvertisedDeviceCallbacks advertisedDeviceCallbacks;
+
+void startScan() {
+  if(!bleScanner) return;
+  if(bleScanner->isScanning()) return;
+  if(iosClient && iosClient->isConnected()) return;
+
+  Serial.println("Starting BLE scan for iOS devices...");
+  bleScanner->setAdvertisedDeviceCallbacks(&advertisedDeviceCallbacks, false);
+  bleScanner->setInterval(45);
+  bleScanner->setWindow(30);
+  bleScanner->setActiveScan(true);
+  bleScanner->start(0, false);
+  lastConnectAttempt = millis();
+  showStatus("Scanning", 0);
+}
+
+bool setupAncs(NimBLEClient* client) {
+  ancsNotificationSource = nullptr;
+  ancsControlPoint = nullptr;
+  ancsDataSource = nullptr;
+  ancsReady = false;
+
+  if(!client) return false;
+
+  NimBLERemoteService* service = client->getService(ANCS_SERVICE_UUID);
+  if(!service) {
+    Serial.println("ANCS service not found");
+    return false;
+  }
+
+  ancsNotificationSource = service->getCharacteristic(ANCS_NOTIFICATION_SOURCE_UUID);
+  ancsControlPoint = service->getCharacteristic(ANCS_CONTROL_POINT_UUID);
+  ancsDataSource = service->getCharacteristic(ANCS_DATA_SOURCE_UUID);
+
+  if(!ancsNotificationSource || !ancsControlPoint || !ancsDataSource) {
+    Serial.println("ANCS characteristics missing");
+    return false;
+  }
+
+  if(ancsNotificationSource->canNotify()) {
+    if(!ancsNotificationSource->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
+      handleAncsNotification(data, length);
+    })) {
+      Serial.println("Failed to subscribe to ANCS notification source");
+      return false;
+    }
+  }
+
+  if(ancsDataSource->canNotify()) {
+    if(!ancsDataSource->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
+      handleAncsData(data, length);
+    })) {
+      Serial.println("Failed to subscribe to ANCS data source");
+      return false;
+    }
+  }
+
+  ancsReady = true;
+  Serial.println("ANCS ready");
+  return true;
+}
+
+bool setupAms(NimBLEClient* client) {
+  amsRemoteCommand = nullptr;
+  amsEntityUpdate = nullptr;
+  amsEntityAttribute = nullptr;
+  amsReady = false;
+
+  if(!client) return false;
+
+  NimBLERemoteService* service = client->getService(AMS_SERVICE_UUID);
+  if(!service) {
+    Serial.println("AMS service not found");
+    return false;
+  }
+
+  amsRemoteCommand = service->getCharacteristic(AMS_REMOTE_COMMAND_UUID);
+  amsEntityUpdate = service->getCharacteristic(AMS_ENTITY_UPDATE_UUID);
+  amsEntityAttribute = service->getCharacteristic(AMS_ENTITY_ATTRIBUTE_UUID);
+
+  if(!amsRemoteCommand || !amsEntityUpdate || !amsEntityAttribute) {
+    Serial.println("AMS characteristics missing");
+    return false;
+  }
+
+  if(amsEntityUpdate->canNotify()) {
+    if(!amsEntityUpdate->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
+      handleAmsEntityUpdate(data, length);
+    })) {
+      Serial.println("Failed to subscribe to AMS entity update");
+      return false;
+    }
+  }
+
+  amsReady = true;
+  Serial.println("AMS ready");
+  return true;
+}
+
+bool connectToAdvertisedDevice(NimBLEAdvertisedDevice* device) {
+  if(!device) return false;
+
+  Serial.println("Connecting to iOS device at " + String(device->getAddress().toString().c_str()));
+
+  if(!iosClient) {
+    iosClient = NimBLEDevice::createClient();
+    iosClient->setClientCallbacks(&clientCallbacks, false);
+    iosClient->setConnectionParams(12, 24, 0, 60);
+    iosClient->setConnectTimeout(5);
+  } else {
+    iosClient->setClientCallbacks(&clientCallbacks, false);
+    if(iosClient->isConnected()) {
+      Serial.println("Already connected to iOS device");
+      return true;
+    }
+  }
+
+  if(!iosClient->connect(device)) {
+    Serial.println("Connection to iOS device failed");
+    startScan();
+    return false;
+  }
+
+  iosConnected = true;
+  Serial.println("Connected to iOS device");
+  lastConnectAttempt = millis();
+
+  bool haveAncs = setupAncs(iosClient);
+  bool haveAms = setupAms(iosClient);
+
+  if(!haveAncs && !haveAms) {
+    Serial.println("Required Apple services not available, disconnecting");
+    iosClient->disconnect();
+    iosConnected = false;
+    startScan();
+    return false;
+  }
+
+  showStatus("Connected", 1800);
+  subscribeAmsAttributes();
+  return true;
+}
+
+void subscribeAmsAttributes() {
+  if(!amsReady || !amsEntityUpdate || !amsEntityAttribute) return;
+
+  // Request notifications for track attributes (title, artist, album)
+  uint8_t trackTitleReq[] = {0x02, 0x00, 0x80, 0x00};
+  uint8_t trackArtistReq[] = {0x02, 0x01, 0x80, 0x00};
+  uint8_t trackAlbumReq[] = {0x02, 0x02, 0x80, 0x00};
+  amsEntityUpdate->writeValue(trackTitleReq, sizeof(trackTitleReq), false);
+  amsEntityUpdate->writeValue(trackArtistReq, sizeof(trackArtistReq), false);
+  amsEntityUpdate->writeValue(trackAlbumReq, sizeof(trackAlbumReq), false);
+
+  // Request current values for the attributes we care about.
+  uint8_t attrRequests[][2] = {
+    {0x02, 0x00},
+    {0x02, 0x01},
+    {0x02, 0x02}
+  };
+
+  for(auto& req : attrRequests) {
+    amsEntityAttribute->writeValue(req, sizeof(req), true);
+  }
+}
+
+void requestAncsAttributes(uint32_t uid) {
+  if(!ancsReady || !ancsControlPoint) return;
+
+  currentNotificationUid = uid;
+
+  uint8_t payload[20];
+  size_t idx = 0;
+  payload[idx++] = 0x00; // Get Notification Attributes command
+  payload[idx++] = uid & 0xFF;
+  payload[idx++] = (uid >> 8) & 0xFF;
+  payload[idx++] = (uid >> 16) & 0xFF;
+  payload[idx++] = (uid >> 24) & 0xFF;
+
+  payload[idx++] = 0x00; // App Identifier
+  payload[idx++] = 0x01; // Title
+  payload[idx++] = 64;
+  payload[idx++] = 0;
+  payload[idx++] = 0x02; // Subtitle
+  payload[idx++] = 64;
+  payload[idx++] = 0;
+  payload[idx++] = 0x03; // Message
+  payload[idx++] = 128;
+  payload[idx++] = 0;
+
+  ancsControlPoint->writeValue(payload, idx, true);
+}
+
+void handleAncsNotification(const uint8_t* data, size_t length) {
+  if(length < 8) return;
+
+  uint8_t eventId = data[0];
+  uint8_t eventFlags = data[1];
+  (void)eventFlags;
+  uint8_t categoryId = data[2];
+  uint32_t uid = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
+
+  currentNotificationCategory = categoryId;
+
+  if(eventId == 0x00 || eventId == 0x01) { // Added or Modified
+    requestAncsAttributes(uid);
+  } else if(eventId == 0x02 && notificationActive && uid == currentNotificationUid) {
+    clearNotification();
+  }
+}
+
+void handleAncsData(const uint8_t* data, size_t length) {
+  if(length < 5) return;
+  if(data[0] != 0x00) return; // Expect Get Notification Attributes response
+
+  uint32_t uid = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
+  if(uid != currentNotificationUid) {
+    currentNotificationUid = uid;
+  }
+
+  size_t index = 5;
+  String appId;
+  String title;
+  String subtitle;
+  String message;
+
+  while(index + 2 < length) {
+    uint8_t attrId = data[index++];
+    if(index + 2 > length) break;
+    uint16_t attrLen = data[index] | (data[index + 1] << 8);
+    index += 2;
+
+    String value = "";
+    if(attrLen && index + attrLen <= length) {
+      value.reserve(attrLen);
+      for(uint16_t i = 0; i < attrLen; ++i) {
+        value += static_cast<char>(data[index + i]);
+      }
+      index += attrLen;
+    } else if(attrLen) {
+      break;
+    }
+
+    switch(attrId) {
+      case 0x00: appId = value; break;
+      case 0x01: title = value; break;
+      case 0x02: subtitle = value; break;
+      case 0x03: message = value; break;
+      default: break;
+    }
+  }
+
+  String displayTitle = title.length() ? title : subtitle;
+  if(displayTitle.length() == 0) displayTitle = message;
+  if(displayTitle.length() == 0) displayTitle = appId;
+
+  String displayMessage = message.length() ? message : subtitle;
+  if(displayMessage.length() == 0) displayMessage = title;
+  if(displayMessage.length() == 0) displayMessage = appId;
+
+  String appDisplay = appId;
+  int dot = appDisplay.lastIndexOf('.');
+  if(dot >= 0 && dot + 1 < appDisplay.length()) {
+    appDisplay = appDisplay.substring(dot + 1);
+  }
+  appDisplay.replace('_', ' ');
+  appDisplay.replace('-', ' ');
+
+  uint32_t duration = (currentNotificationCategory == 0x01 || currentNotificationCategory == 0x02) ? 0 : 12000;
+  showNotification(displayTitle, displayMessage, appDisplay, duration);
+}
+
+void handleAmsEntityUpdate(const uint8_t* data, size_t length) {
+  if(length < 5) return;
+
+  uint8_t entityId = data[0];
+  uint8_t attributeId = data[1];
+  uint16_t valueLen = data[3] | (data[4] << 8);
+  if(5 + valueLen > length) return;
+
+  String value = "";
+  if(valueLen) {
+    value.reserve(valueLen);
+    for(uint16_t i = 0; i < valueLen; ++i) {
+      value += static_cast<char>(data[5 + i]);
+    }
+  }
+
+  if(entityId == 0x02) { // Track entity
+    if(attributeId == 0x00) {
+      song = cleanDisplayText(value);
+      scrollOffset = 0;
+      lastScroll = millis();
+      if(!notificationActive && !statusActive) {
+        drawBottomScroll();
+      }
+    } else if(attributeId == 0x01) {
+      artist = cleanDisplayText(value);
+      drawTopInfo();
+    } else if(attributeId == 0x02) {
+      album = cleanDisplayText(value);
+      drawTopInfo();
+    }
+  }
+}
+
+void sendAmsCommand(uint8_t commandId) {
+  if(!amsReady || !amsRemoteCommand) return;
+  amsRemoteCommand->writeValue(&commandId, 1, false);
+}
+
+// ===== STRING UTILITIES =====
 String cleanDisplayText(const String& input) {
   String cleaned;
   cleaned.reserve(input.length());
@@ -209,156 +646,6 @@ String cleanDisplayText(const String& input) {
   return cleaned;
 }
 
-void handleUartMessage(const String& s) {
-  if(!s.length()) return;
-
-  int p1 = s.indexOf('|');
-  if(p1 < 0) return;
-  String cmd = s.substring(0, p1);
-
-  if(cmd == "SONG") {
-    int p2 = s.indexOf('|', p1+1);
-    int p3 = s.indexOf('|', p2+1);
-    if(p2 < 0 || p3 < 0) return;
-
-    artist = cleanDisplayText(s.substring(p1+1, p2));
-    album  = cleanDisplayText(s.substring(p2+1, p3));
-    song   = cleanDisplayText(s.substring(p3+1));
-    drawTopInfo();
-    scrollOffset = 0;
-    sendUartNotification("ACK");
-  }
-}
-
-class RXCB : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*ci*/) override {
-    std::string v = c->getValue();
-    if(v.empty()) return;
-
-    uartBuffer += String(v.c_str());
-    if(uartBuffer.length() > 256) {
-      uartBuffer = uartBuffer.substring(uartBuffer.length() - 256);
-      resetLegacyPacketCandidate();
-    }
-
-    int newlineIndex = uartBuffer.indexOf('\n');
-    while(newlineIndex >= 0) {
-      String message = uartBuffer.substring(0, newlineIndex);
-      uartBuffer.remove(0, newlineIndex + 1);
-      message.trim();
-      handleUartMessage(message);
-      resetLegacyPacketCandidate();
-      newlineIndex = uartBuffer.indexOf('\n');
-    }
-
-    // Support legacy single-packet commands that omit a newline terminator.
-    if(uartBuffer.length() > 0) {
-      int start = 0;
-      while(start < uartBuffer.length()) {
-        char c = uartBuffer.charAt(start);
-        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-          start++;
-        } else {
-          break;
-        }
-      }
-
-      int end = uartBuffer.length();
-      while(end > start) {
-        char c = uartBuffer.charAt(end - 1);
-        if(c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-          end--;
-        } else {
-          break;
-        }
-      }
-
-      if(start < end) {
-        String pending = uartBuffer.substring(start, end);
-
-        if(pending.indexOf('\n') >= 0 || pending.indexOf('\r') >= 0) {
-          resetLegacyPacketCandidate();
-          return;
-        }
-
-        int p1 = pending.indexOf('|');
-        if(p1 > 0) {
-          int p2 = pending.indexOf('|', p1 + 1);
-          if(p2 > 0) {
-            int p3 = pending.indexOf('|', p2 + 1);
-            if(p3 > 0) {
-              legacyPacketCandidate = pending;
-              legacyPacketTimestamp = millis();
-              legacyPacketStart = start;
-              legacyPacketEnd = end;
-              return;
-            }
-          }
-        }
-
-        resetLegacyPacketCandidate();
-      } else {
-        uartBuffer = "";
-        resetLegacyPacketCandidate();
-      }
-    } else {
-      resetLegacyPacketCandidate();
-    }
-  }
-};
-
-void processLegacyPacketCandidate(uint32_t now) {
-  if(!legacyPacketCandidate.length()) return;
-
-  if(legacyPacketStart < 0 || legacyPacketEnd < 0) {
-    resetLegacyPacketCandidate();
-    return;
-  }
-
-  if(legacyPacketEnd > uartBuffer.length()) {
-    resetLegacyPacketCandidate();
-    return;
-  }
-
-  if(uartBuffer.indexOf('\n') >= 0) {
-    resetLegacyPacketCandidate();
-    return;
-  }
-
-  String current = uartBuffer.substring(legacyPacketStart, legacyPacketEnd);
-  if(current != legacyPacketCandidate) {
-    resetLegacyPacketCandidate();
-    return;
-  }
-
-  if(now - legacyPacketTimestamp < LEGACY_PACKET_GRACE_MS) {
-    return;
-  }
-
-  handleUartMessage(legacyPacketCandidate);
-  uartBuffer.remove(0, legacyPacketEnd);
-  resetLegacyPacketCandidate();
-}
-
-// ===== UART SERVICE =====
-void setupUartService(NimBLEServer* srv) {
-  uartSvc = srv->createService(UART_SVC_UUID);
-  uartRX = uartSvc->createCharacteristic(UART_RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  uartTX = uartSvc->createCharacteristic(UART_TX_UUID, NIMBLE_PROPERTY::NOTIFY);
-  uartTX->setCallbacks(new TXCB());
-  uartRX->setCallbacks(new RXCB());
-  uartSvc->start();
-  Serial.println("UART service started");
-}
-
-void sendUartNotification(const String& message) {
-  if(!uartTX || !uartSubscribed) return;
-
-  std::string payload(message.c_str());
-  uartTX->setValue(payload);
-  uartTX->notify();
-}
-
 // ===== SETUP =====
 void setup(){
   Serial.begin(115200);
@@ -370,97 +657,95 @@ void setup(){
   oledTop.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   oledBot.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
 
-  NimBLEDevice::init("");
+  NimBLEDevice::init("JuiceBox Remote");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-  NimBLEDevice::setSecurityAuth(false, false, true);
-  bleKeyboard.begin();
-  delay(50);
-  NimBLEServer* server = NimBLEDevice::getServer();
-  setupUartService(server);
+  NimBLEDevice::setSecurityAuth(true, false, true);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+  NimBLEDevice::setSecurityInitKey(BLE_ENC_KEY | BLE_ID_KEY);
+  NimBLEDevice::setSecurityRespKey(BLE_ENC_KEY | BLE_ID_KEY);
 
-  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->setName("JuiceBox Remote");
-  adv->setAppearance(0x0080);
-  adv->setPreferredParams(0x06, 0x12);
-  adv->addServiceUUID(NimBLEUUID((uint16_t)0x1812));
-  adv->addServiceUUID(UART_SVC_UUID);
-  adv->enableScanResponse(true);
-  adv->start();
+  bleScanner = NimBLEDevice::getScan();
+  bleScanner->setAdvertisedDeviceCallbacks(&advertisedDeviceCallbacks, false);
+  bleScanner->setInterval(45);
+  bleScanner->setWindow(30);
+  bleScanner->setActiveScan(true);
 
   showBoot();
   calibrateCenter();
-  showReady();
-
-  lastConnectAttempt = millis();
+  showStatus("Scanning", 0);
+  startScan();
 }
 
 // ===== LOOP =====
 void loop(){
   uint32_t now = millis();
 
-  processLegacyPacketCandidate(now);
+  if(notificationActive && notificationExpiry && now > notificationExpiry) {
+    clearNotification();
+  }
 
-  bool kbConnected = bleKeyboard.isConnected();
-  if(kbConnected != lastConnected) {
-    Serial.println("Connection state changed. Connected: " + String(kbConnected) + ", Advertising: " + String(NimBLEDevice::getAdvertising()->isAdvertising()));
-    if(kbConnected) {
-      songRequestPending = true;
-    } else {
-      songRequestPending = false;
+  if(statusActive && statusExpiry && now > statusExpiry) {
+    statusActive = false;
+    if(song.length() > 0 && !notificationActive) {
+      drawBottomScroll();
+    } else if(!notificationActive) {
+      drawBottomStatic("Ready");
     }
-    lastConnected = kbConnected;
   }
 
-  // Restart if no connection after 30s
-  bool anyConnection = kbConnected || uartSubscribed;
+  if(!iosConnected) {
+    if(bleScanner && !bleScanner->isScanning() && (now - lastConnectAttempt > 5000)) {
+      startScan();
+    }
 
-  if (!anyConnection && (now - lastConnectAttempt > 30000)) {
-    Serial.println("No connection after 30s — restarting...");
-    drawBottomStatic("Restarting");
-    delay(1500);
-    ESP.restart();
+    if(now - lastConnectAttempt > 60000) {
+      Serial.println("No iOS connection for 60s — restarting...");
+      showStatus("Restarting", 0);
+      delay(1500);
+      ESP.restart();
+    }
+  } else {
+    lastConnectAttempt = now;
   }
 
-  if (anyConnection) lastConnectAttempt = now;
-
-  if(songRequestPending && uartTX && uartSubscribed) {
-    sendUartNotification("REQ|SONG");
-    songRequestPending = false;
-  }
-
-  if(song.length() > 0 && (kbConnected || uartSubscribed)) {
-    drawBottomScroll();  // Continuous scroll update
+  if(song.length() > 0 && !notificationActive && !statusActive) {
+    drawBottomScroll();
   }
 
   smoothRead();
   bool btn = (digitalRead(JOY_SW_PIN) == LOW);
   if(btn && (now - tBtn > 280)){
     Serial.println("Button pressed");
-    tBtn = now; sendMedia(KEY_MEDIA_PLAY_PAUSE);
-    drawBottomStatic("Play");
+    tBtn = now;
+    sendAmsCommand(AMS_CMD_TOGGLE_PLAY_PAUSE);
+    showStatus("Play/Pause", 800);
   }
 
   if(!inDZ(emaX) && beyond(emaX)){
     if(emaX>0 && now-tUp>VOL_REPEAT_MS){
       Serial.println("Joystick right");
-      sendMedia(KEY_MEDIA_VOLUME_UP);
-      drawBottomStatic("Vol +"); tUp=now;
+      sendAmsCommand(AMS_CMD_VOLUME_UP);
+      showStatus("Vol +", 600);
+      tUp=now;
     } else if(emaX<0 && now-tDn>VOL_REPEAT_MS){
       Serial.println("Joystick left");
-      sendMedia(KEY_MEDIA_VOLUME_DOWN);
-      drawBottomStatic("Vol -"); tDn=now;
+      sendAmsCommand(AMS_CMD_VOLUME_DOWN);
+      showStatus("Vol -", 600);
+      tDn=now;
     }
   }
 
   if(!inDZ(emaY) && beyond(emaY)){
     if(emaY>0 && now-tR>ACTION_COOLDOWN){
       Serial.println("Joystick down");
-      sendMedia(KEY_MEDIA_NEXT_TRACK);
-      drawBottomStatic("Next >"); tR=now;
+      sendAmsCommand(AMS_CMD_NEXT_TRACK);
+      showStatus("Next >", 800);
+      tR=now;
     } else if(emaY<0 && now-tL>ACTION_COOLDOWN){
       Serial.println("Joystick up");
-      sendMedia(KEY_MEDIA_PREVIOUS_TRACK);
-      drawBottomStatic("< Prev"); tL=now;
+      sendAmsCommand(AMS_CMD_PREVIOUS_TRACK);
+      showStatus("< Prev", 800);
+      tL=now;
     }
   }
 
