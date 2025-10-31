@@ -52,6 +52,8 @@ static const NimBLEUUID AMS_ENTITY_ATTRIBUTE_UUID("C6B2F38C-23AB-46D8-A6AB-A3A87
 NimBLEScan* bleScanner = nullptr;
 NimBLEClient* iosClient = nullptr;
 
+const uint32_t IOS_CONNECT_TIMEOUT_MS = 8000;
+
 NimBLERemoteCharacteristic* ancsNotificationSource = nullptr;
 NimBLERemoteCharacteristic* ancsControlPoint = nullptr;
 NimBLERemoteCharacteristic* ancsDataSource = nullptr;
@@ -274,8 +276,16 @@ void showStatus(const String& message, uint32_t durationMs) {
 }
 
 class ClientCallbacks : public NimBLEClientCallbacks {
-  void onDisconnect(NimBLEClient* /*client*/, int /*reason*/) override {
-    Serial.println("iOS device disconnected");
+  void onDisconnect(NimBLEClient* client, int reason) override {
+    String line = "iOS device disconnected";
+    if(client) {
+      line += ": ";
+      line += client->getPeerAddress().toString().c_str();
+    }
+    line += " (reason=";
+    line += String(reason);
+    line += ")";
+    Serial.println(line);
     iosConnected = false;
     ancsReady = false;
     amsReady = false;
@@ -424,9 +434,10 @@ bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device) {
     iosClient = NimBLEDevice::createClient();
     iosClient->setClientCallbacks(&clientCallbacks, false);
     iosClient->setConnectionParams(12, 24, 0, 60);
-    iosClient->setConnectTimeout(5);
+    iosClient->setConnectTimeout(IOS_CONNECT_TIMEOUT_MS);
   } else {
     iosClient->setClientCallbacks(&clientCallbacks, false);
+    iosClient->setConnectTimeout(IOS_CONNECT_TIMEOUT_MS);
     if(iosClient->isConnected()) {
       Serial.println("Already connected to iOS device");
       return true;
@@ -435,6 +446,13 @@ bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device) {
 
   if(!iosClient->connect(device)) {
     Serial.println("Connection to iOS device failed");
+    if(iosClient) {
+      NimBLEDevice::deleteClient(iosClient);
+      iosClient = nullptr;
+    }
+    if(bleScanner) {
+      bleScanner->clearResults();
+    }
     startScan();
     return false;
   }
