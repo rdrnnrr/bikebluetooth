@@ -316,10 +316,13 @@ final class NowPlayingManager: ObservableObject {
 
         #if !targetEnvironment(simulator)
         // Only attempt MediaRemote when the app is active to avoid spurious "Operation not permitted" logs.
-        if UIApplication.shared.applicationState == .active,
-           let remoteInfo = MediaRemoteReader.nowPlayingInfo() {
-            cachedNowPlayingInfo = remoteInfo
-            return remoteInfo
+        if UIApplication.shared.applicationState == .active {
+            #if USE_MEDIAREMOTE
+            if let remoteInfo = MediaRemoteReader.nowPlayingInfo() {
+                cachedNowPlayingInfo = remoteInfo
+                return remoteInfo
+            }
+            #endif
         }
         #endif
 
