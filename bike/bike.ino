@@ -56,6 +56,7 @@ NimBLEClient* iosClient = nullptr;
 const uint32_t IOS_CONNECT_TIMEOUT_MS = 8000;
 const uint8_t IOS_MAX_RETRY_PER_DEVICE = 3;
 const uint32_t IOS_RETRY_BACKOFF_MS = 120000;
+const uint32_t IOS_FAILURE_RESET_MS = 45000;
 
 NimBLERemoteCharacteristic* ancsNotificationSource = nullptr;
 NimBLERemoteCharacteristic* ancsControlPoint = nullptr;
@@ -459,21 +460,55 @@ bool setupAms(NimBLEClient* client) {
 bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device) {
   if(!device) return false;
 
-  Serial.println("Connecting to iOS device at " + String(device->getAddress().toString().c_str()));
-
   std::string addrKeyStd = device->getAddress().toString();
   String addrKey(addrKeyStd.c_str());
-  auto failureEntry = iosFailureTracker.find(addrKeyStd);
-  if(failureEntry != iosFailureTracker.end()) {
-    uint8_t attempts = failureEntry->second.attempts;
-    uint32_t lastTime = failureEntry->second.lastAttemptMs;
-    uint32_t now = millis();
-    if(attempts >= IOS_MAX_RETRY_PER_DEVICE && (now - lastTime) < IOS_RETRY_BACKOFF_MS) {
-      Serial.println("Skipping " + addrKey + " due to repeated failures");
-      startScan();
-      return false;
+
+  bool bypassBackoff = false;
+  if(device->isAdvertisingService(ANCS_SERVICE_UUID) || device->isAdvertisingService(AMS_SERVICE_UUID)) {
+    bypassBackoff = true;
+  }
+
+  if(!bypassBackoff && device->haveName() && strlen(IOS_NAME_HINT) > 0) {
+    String advName = String(device->getName().c_str());
+    String advLower = advName;
+    advLower.toLowerCase();
+    String hint = String(IOS_NAME_HINT);
+    hint.toLowerCase();
+    if(advLower == hint) {
+      bypassBackoff = true;
     }
   }
+
+  auto failureEntry = iosFailureTracker.find(addrKeyStd);
+  if(bypassBackoff && failureEntry != iosFailureTracker.end()) {
+    failureEntry->second.attempts = 0;
+  }
+
+  if(failureEntry != iosFailureTracker.end()) {
+    FailureRecord &record = failureEntry->second;
+    uint32_t now = millis();
+    uint32_t elapsed = now - record.lastAttemptMs;
+
+    if(elapsed >= IOS_FAILURE_RESET_MS) {
+      record.attempts = 0;
+    }
+
+    if(!bypassBackoff && record.attempts >= IOS_MAX_RETRY_PER_DEVICE) {
+      if(elapsed < IOS_RETRY_BACKOFF_MS) {
+        uint32_t remaining = IOS_RETRY_BACKOFF_MS - elapsed;
+        uint32_t remainingSeconds = (remaining + 999) / 1000;
+        Serial.println(
+          "Skipping " + addrKey + " due to repeated failures (" + String(remainingSeconds) + "s cooldown)"
+        );
+        startScan();
+        return false;
+      }
+
+      record.attempts = 0;
+    }
+  }
+
+  Serial.println("Connecting to iOS device at " + String(device->getAddress().toString().c_str()));
 
   if(!iosClient) {
     iosClient = NimBLEDevice::createClient();
