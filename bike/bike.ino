@@ -6,7 +6,23 @@
 #include <string>
 #include <limits.h>
 #include <cstring>
-#include <map>
+#include <WiFi.h>
+#include <esp_log.h>
+#include <esp_gap_ble_api.h>
+
+#if defined(CONFIG_NIMBLE_CPP_IDF)
+extern "C" {
+#include "host/ble_gap.h"
+#include "host/ble_hs.h"
+#include "nimble/hci_common.h"
+}
+#else
+extern "C" {
+#include "nimble/nimble/host/include/host/ble_gap.h"
+#include "nimble/nimble/host/include/host/ble_hs.h"
+#include "nimble/nimble/include/nimble/hci_common.h"
+}
+#endif
 
 // ===== PINS =====
 #define JOY_X_PIN 34
@@ -45,34 +61,29 @@ static const NimBLEUUID ANCS_NOTIFICATION_SOURCE_UUID("9FBF120D-6301-42D9-8C58-2
 static const NimBLEUUID ANCS_CONTROL_POINT_UUID("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9");
 static const NimBLEUUID ANCS_DATA_SOURCE_UUID("22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB");
 
+// --- AMS official UUIDs (per Apple docs) ---
 static const NimBLEUUID AMS_SERVICE_UUID("89D3502B-0F36-433A-8EF4-C502AD55F8DC");
-static const NimBLEUUID AMS_REMOTE_COMMAND_UUID("9B3C81D8-57B1-4510-8A45-A1EFD60B605A");
+static const NimBLEUUID AMS_REMOTE_COMMAND_UUID("9B3C81D8-57B1-4A8A-B8DF-0E56F7CA51C2");
 static const NimBLEUUID AMS_ENTITY_UPDATE_UUID("2F7CABCE-808D-411F-9A0C-BB92BA96C102");
 static const NimBLEUUID AMS_ENTITY_ATTRIBUTE_UUID("C6B2F38C-23AB-46D8-A6AB-A3A870B5A1D6");
+// Reference: https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleMediaService_Reference/Specification/Specification.html
 
-NimBLEScan* bleScanner = nullptr;
-NimBLEClient* iosClient = nullptr;
 
-const uint32_t IOS_CONNECT_TIMEOUT_MS = 8000;
-const uint8_t IOS_MAX_RETRY_PER_DEVICE = 3;
-const uint32_t IOS_RETRY_BACKOFF_MS = 120000;
-const uint32_t IOS_FAILURE_RESET_MS = 45000;
-
-NimBLERemoteCharacteristic* ancsNotificationSource = nullptr;
 NimBLERemoteCharacteristic* ancsControlPoint = nullptr;
 NimBLERemoteCharacteristic* ancsDataSource = nullptr;
 
 NimBLERemoteCharacteristic* amsRemoteCommand = nullptr;
-NimBLERemoteCharacteristic* amsEntityUpdate = nullptr;
-NimBLERemoteCharacteristic* amsEntityAttribute = nullptr;
+
 
 bool iosConnected = false;
-bool ancsReady = false;
 bool amsReady = false;
+bool ancsReady = false;
+bool isConnecting = false;
+
+
 
 // Optional hint for the advertised iOS device name to prioritize/accept.
-// Adjust this string to match your phone's Bluetooth name if discovery fails.
-const char* IOS_NAME_HINT = "Dennis's iPhone";
+const char* IOS_NAME_HINT = "iPhone";
 
 // ===== JOYSTICK =====
 const float EMA_ALPHA = 0.18f;
@@ -80,9 +91,13 @@ const int DEADZONE = 350;
 const int TRIGGER_THRESH = 1200;
 const uint16_t VOL_REPEAT_MS = 120;
 const uint16_t ACTION_COOLDOWN = 220;
+// Long-press time (ms) to wipe bonds from the joystick button.
+const uint32_t BOND_CLEAR_HOLD_MS = 3000;
 float emaX = 0, emaY = 0;
 int midX = 2048, midY = 2048;
 uint32_t tUp=0, tDn=0, tL=0, tR=0, tBtn=0;
+bool btnWasDown = false;
+uint32_t btnDownAt = 0;
 
 // ===== STATE =====
 String artist = "";
@@ -101,12 +116,6 @@ bool notificationActive = false;
 bool statusActive = false;
 uint32_t currentNotificationUid = 0;
 uint8_t currentNotificationCategory = 0;
-struct FailureRecord {
-  uint8_t attempts = 0;
-  uint32_t lastAttemptMs = 0;
-};
-
-std::map<std::string, FailureRecord> iosFailureTracker;
 
 enum AmsRemoteCommand : uint8_t {
   AMS_CMD_PLAY = 0x00,
@@ -119,106 +128,22 @@ enum AmsRemoteCommand : uint8_t {
 };
 
 // Forward declarations
-String cleanDisplayText(const String& input);
-void startScan();
-bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device);
-bool looksLikeIosDevice(const NimBLEAdvertisedDevice* device);
-bool setupAncs(NimBLEClient* client);
-bool setupAms(NimBLEClient* client);
-void requestAncsAttributes(uint32_t uid);
-void handleAncsNotification(const uint8_t* data, size_t length);
-void handleAncsData(const uint8_t* data, size_t length);
-void handleAmsEntityUpdate(const uint8_t* data, size_t length);
-void subscribeAmsAttributes();
-void showNotification(const String& title, const String& message, const String& appName, uint32_t durationMs = 12000);
+void showStatus(const String& message, uint32_t durationMs);
+void showNotification(const String& title, const String& message, const String& appName, uint32_t durationMs);
 void clearNotification();
+void startAdvertising();
+String cleanDisplayText(const String& input);
 void drawBottomMessage(const String& line1, const String& line2);
-void showStatus(const String& message, uint32_t durationMs = 1500);
-void sendAmsCommand(uint8_t commandId);
+void drawTopInfo();
+void drawBottomStatic(const char* txt);
+void drawBottomScroll();
 
-// ===== HELPERS =====
-inline bool inDZ(float v){ return fabs(v) < DEADZONE; }
-inline bool beyond(float v){ return fabs(v) >= TRIGGER_THRESH; }
+void handleAncsData(const uint8_t* data, size_t length);
+void requestAncsAttributes(uint32_t uid);
 
-void calibrateCenter(){
-  long sx=0, sy=0;
-  for(int i=0;i<24;i++){ sx+=analogRead(JOY_X_PIN); sy+=analogRead(JOY_Y_PIN); delay(4); }
-  midX=sx/24; midY=sy/24; emaX=emaY=0;
-}
 
-void smoothRead(){
-  int rx=analogRead(JOY_X_PIN);
-  int ry=analogRead(JOY_Y_PIN);
-  emaX=(1.0f-EMA_ALPHA)*emaX + EMA_ALPHA*(rx-midX);
-  emaY=(1.0f-EMA_ALPHA)*emaY + EMA_ALPHA*(ry-midY);
-}
 
-// ===== DISPLAY =====
-void drawTopInfo() {
-  if(notificationActive) return;
-  oledTop.clearDisplay();
-  oledTop.setTextColor(SSD1306_WHITE);
-  oledTop.setTextSize(1);
-  oledTop.setCursor(0, 0);
-  oledTop.println(artist.length() ? artist : "Unknown Artist");
-  oledTop.setCursor(0, 16);
-  oledTop.println(album.length() ? album : "Unknown Album");
-  oledTop.display();
-}
 
-void drawBottomStatic(const char* txt) {
-  oledBot.clearDisplay();
-  oledBot.setTextColor(SSD1306_WHITE);
-  oledBot.setTextSize(2);
-  int16_t x1,y1; uint16_t w,h;
-  oledBot.getTextBounds(txt,0,0,&x1,&y1,&w,&h);
-  int x=(128-w)/2; int y=(32-h)/2;
-  oledBot.setCursor(x,y);
-  oledBot.println(txt);
-  oledBot.display();
-}
-
-void drawBottomMessage(const String& line1, const String& line2) {
-  oledBot.clearDisplay();
-  oledBot.setTextColor(SSD1306_WHITE);
-  oledBot.setTextSize(1);
-  oledBot.setCursor(0, 0);
-  oledBot.println(line1);
-  oledBot.setCursor(0, 16);
-  oledBot.println(line2);
-  oledBot.display();
-}
-
-void drawBottomScroll() {
-  if(notificationActive || statusActive) return;
-  oledBot.clearDisplay();
-  oledBot.setTextColor(SSD1306_WHITE);
-  oledBot.setTextSize(2);
-
-  int16_t x1,y1; uint16_t w,h;
-  oledBot.getTextBounds(song.c_str(),0,0,&x1,&y1,&w,&h);
-
-  // Scroll if longer than screen width
-  if (w > 128) {
-    oledBot.setCursor(-scrollOffset, 8);
-    oledBot.print(song);
-    oledBot.display();
-
-    if (millis() - lastScroll > 150) {
-      scrollOffset++;
-      if (scrollOffset > w + 16) scrollOffset = 0;
-      lastScroll = millis();
-    }
-  } else {
-    int x = (128 - w)/2;
-    oledBot.setCursor(x, 8);
-    oledBot.print(song);
-    oledBot.display();
-  }
-}
-
-void showBoot(){ oledTop.clearDisplay(); oledBot.clearDisplay(); drawBottomStatic("Booting"); }
-void showReady(){ drawTopInfo(); drawBottomStatic("Ready"); }
 
 void showNotification(const String& title, const String& message, const String& appName, uint32_t durationMs) {
   notificationTitle = cleanDisplayText(title);
@@ -278,405 +203,179 @@ void showStatus(const String& message, uint32_t durationMs) {
   String cleaned = cleanDisplayText(message);
   drawBottomStatic(cleaned.c_str());
   statusActive = true;
-  if(durationMs == 0) {
-    statusExpiry = 0;
+  statusExpiry = durationMs ? millis() + durationMs : 0;
+}
+
+void drawBottomMessage(const String& line1, const String& line2) {
+  oledBot.clearDisplay();
+  oledBot.setTextColor(SSD1306_WHITE);
+  oledBot.setTextSize(1);
+  oledBot.setCursor(0, 0);
+  oledBot.println(line1);
+  oledBot.setCursor(0, 16);
+  oledBot.println(line2);
+  oledBot.display();
+}
+
+// ===== HELPERS ====== 
+inline bool inDZ(float v){ return fabs(v) < DEADZONE; }
+inline bool beyond(float v){ return fabs(v) >= TRIGGER_THRESH; }
+
+void calibrateCenter(){
+  long sx=0, sy=0;
+  for(int i=0;i<24;i++){ sx+=analogRead(JOY_X_PIN); sy+=analogRead(JOY_Y_PIN); delay(4); }
+  midX=sx/24; midY=sy/24; emaX=emaY=0;
+}
+
+void smoothRead(){
+  int rx=analogRead(JOY_X_PIN);
+  int ry=analogRead(JOY_Y_PIN);
+  emaX=(1.0f-EMA_ALPHA)*emaX + EMA_ALPHA*(rx-midX);
+  emaY=(1.0f-EMA_ALPHA)*emaY + EMA_ALPHA*(ry-midY);
+}
+
+// ===== BOND MANAGEMENT =====
+
+
+// ===== DISPLAY =====
+void drawTopInfo() {
+  if(notificationActive) return;
+  oledTop.clearDisplay();
+  oledTop.setTextColor(SSD1306_WHITE);
+  oledTop.setTextSize(1);
+  oledTop.setCursor(0, 0);
+  oledTop.println(artist.length() ? artist : "Unknown Artist");
+  oledTop.setCursor(0, 16);
+  oledTop.println(album.length() ? album : "Unknown Album");
+  oledTop.display();
+}
+
+void drawBottomStatic(const char* txt) {
+  oledBot.clearDisplay();
+  oledBot.setTextColor(SSD1306_WHITE);
+  oledBot.setTextSize(2);
+  int16_t x1,y1; uint16_t w,h;
+  oledBot.getTextBounds(txt,0,0,&x1,&y1,&w,&h);
+  int x=(128-w)/2; int y=(32-h)/2;
+  oledBot.setCursor(x,y);
+  oledBot.println(txt);
+  oledBot.display();
+}
+
+
+
+void drawBottomScroll() {
+  if(notificationActive || statusActive) return;
+  oledBot.clearDisplay();
+  oledBot.setTextColor(SSD1306_WHITE);
+  oledBot.setTextSize(2);
+
+  int16_t x1,y1; uint16_t w,h;
+  oledBot.getTextBounds(song.c_str(),0,0,&x1,&y1,&w,&h);
+
+  if (w > 128) {
+    oledBot.setCursor(-scrollOffset, 8);
+    oledBot.print(song);
+    oledBot.display();
+
+    if (millis() - lastScroll > 150) {
+      scrollOffset++;
+      if (scrollOffset > w + 16) scrollOffset = 0;
+      lastScroll = millis();
+    }
   } else {
-    statusExpiry = millis() + durationMs;
+    int x = (128 - w)/2;
+    oledBot.setCursor(x, 8);
+    oledBot.print(song);
+    oledBot.display();
   }
 }
+
+
+
+
+void connectToServer(NimBLEAdvertisedDevice* advertisedDevice);
+static void scanEndedCB(NimBLEScanResults results);
 
 class ClientCallbacks : public NimBLEClientCallbacks {
-  void onConnect(NimBLEClient* client) override {
-    if(client) {
-      std::string addrStd = client->getPeerAddress().toString();
-      iosFailureTracker.erase(addrStd);
+    void onConnect(NimBLEClient* pClient) {
+        Serial.println("Connected to iPhone");
+        iosConnected = true;
     }
-    Serial.println("Client connected");
-  }
 
-  void onConnectFail(NimBLEClient* client, int reason) override {
-    String addr = client ? String(client->getPeerAddress().toString().c_str()) : String("unknown");
-    Serial.println("Connection failed (" + String(reason) + ") for " + addr);
-    if(client) {
-      std::string addrStd = client->getPeerAddress().toString();
-      FailureRecord &entry = iosFailureTracker[addrStd];
-      if(entry.attempts < 255) {
-        entry.attempts++;
-      }
-      entry.lastAttemptMs = millis();
-      Serial.println("Failure count for " + addr + ": " + String(entry.attempts));
+    void onDisconnect(NimBLEClient* pClient) {
+        Serial.println("Disconnected from iPhone");
+        iosConnected = false;
+        NimBLEDevice::getScan()->start(0, scanEndedCB);
     }
-  }
-
-  void onDisconnect(NimBLEClient* client, int reason) override {
-    String line = "iOS device disconnected";
-    if(client) {
-      line += ": ";
-      line += client->getPeerAddress().toString().c_str();
-    }
-    line += " (reason=";
-    line += String(reason);
-    line += ")";
-    Serial.println(line);
-    iosConnected = false;
-    ancsReady = false;
-    amsReady = false;
-    ancsNotificationSource = nullptr;
-    ancsControlPoint = nullptr;
-    ancsDataSource = nullptr;
-    amsRemoteCommand = nullptr;
-    amsEntityUpdate = nullptr;
-    amsEntityAttribute = nullptr;
-    song = "";
-    artist = "";
-    album = "";
-    notificationActive = false;
-    statusActive = false;
-    drawTopInfo();
-    drawBottomStatic("Disconnected");
-    startScan();
-  }
 };
 
-class AdvertisedDeviceCallbacks : public NimBLEScanCallbacks {
-  void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
-    if(iosConnected || !advertisedDevice) return;
-
-    if(!looksLikeIosDevice(advertisedDevice)) {
-      return;
-    }
-
-    std::string description = advertisedDevice->toString();
-    Serial.println("Found potential iOS device: " + String(description.c_str()));
-    NimBLEDevice::getScan()->stop();
-    NimBLEAdvertisedDevice* device = new NimBLEAdvertisedDevice(*advertisedDevice);
-    connectToAdvertisedDevice(device);
-    delete device;
-  }
-};
-
-static ClientCallbacks clientCallbacks;
-static AdvertisedDeviceCallbacks advertisedDeviceCallbacks;
-
-void startScan() {
-  if(!bleScanner) return;
-  if(bleScanner->isScanning()) return;
-  if(iosClient && iosClient->isConnected()) return;
-
-  Serial.println("Starting BLE scan for iOS devices...");
-  bleScanner->setScanCallbacks(&advertisedDeviceCallbacks, false);
-  bleScanner->setDuplicateFilter(true);
-  bleScanner->setInterval(45);
-  bleScanner->setWindow(30);
-  bleScanner->setActiveScan(true);
-  bleScanner->start(0, false);
-  lastConnectAttempt = millis();
-  showStatus("Scanning", 0);
-}
-
-bool setupAncs(NimBLEClient* client) {
-  ancsNotificationSource = nullptr;
-  ancsControlPoint = nullptr;
-  ancsDataSource = nullptr;
-  ancsReady = false;
-
-  if(!client) return false;
-
-  NimBLERemoteService* service = client->getService(ANCS_SERVICE_UUID);
-  if(!service) {
-    Serial.println("ANCS service not found");
-    return false;
-  }
-
-  ancsNotificationSource = service->getCharacteristic(ANCS_NOTIFICATION_SOURCE_UUID);
-  ancsControlPoint = service->getCharacteristic(ANCS_CONTROL_POINT_UUID);
-  ancsDataSource = service->getCharacteristic(ANCS_DATA_SOURCE_UUID);
-
-  if(!ancsNotificationSource || !ancsControlPoint || !ancsDataSource) {
-    Serial.println("ANCS characteristics missing");
-    return false;
-  }
-
-  if(ancsNotificationSource->canNotify()) {
-    if(!ancsNotificationSource->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
-      handleAncsNotification(data, length);
-    })) {
-      Serial.println("Failed to subscribe to ANCS notification source");
-      return false;
-    }
-  }
-
-  if(ancsDataSource->canNotify()) {
-    if(!ancsDataSource->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
-      handleAncsData(data, length);
-    })) {
-      Serial.println("Failed to subscribe to ANCS data source");
-      return false;
-    }
-  }
-
-  ancsReady = true;
-  Serial.println("ANCS ready");
-  return true;
-}
-
-bool setupAms(NimBLEClient* client) {
-  amsRemoteCommand = nullptr;
-  amsEntityUpdate = nullptr;
-  amsEntityAttribute = nullptr;
-  amsReady = false;
-
-  if(!client) return false;
-
-  NimBLERemoteService* service = client->getService(AMS_SERVICE_UUID);
-  if(!service) {
-    Serial.println("AMS service not found");
-    return false;
-  }
-
-  amsRemoteCommand = service->getCharacteristic(AMS_REMOTE_COMMAND_UUID);
-  amsEntityUpdate = service->getCharacteristic(AMS_ENTITY_UPDATE_UUID);
-  amsEntityAttribute = service->getCharacteristic(AMS_ENTITY_ATTRIBUTE_UUID);
-
-  if(!amsRemoteCommand || !amsEntityUpdate || !amsEntityAttribute) {
-    Serial.println("AMS characteristics missing");
-    return false;
-  }
-
-  if(amsEntityUpdate->canNotify()) {
-    if(!amsEntityUpdate->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
-      handleAmsEntityUpdate(data, length);
-    })) {
-      Serial.println("Failed to subscribe to AMS entity update");
-      return false;
-    }
-  }
-
-  amsReady = true;
-  Serial.println("AMS ready");
-  return true;
-}
-
-bool connectToAdvertisedDevice(const NimBLEAdvertisedDevice* device) {
-  if(!device) return false;
-
-  std::string addrKeyStd = device->getAddress().toString();
-  String addrKey(addrKeyStd.c_str());
-
-  bool bypassBackoff = false;
-  if(device->isAdvertisingService(ANCS_SERVICE_UUID) || device->isAdvertisingService(AMS_SERVICE_UUID)) {
-    bypassBackoff = true;
-  }
-
-  if(!bypassBackoff && device->haveName() && strlen(IOS_NAME_HINT) > 0) {
-    String advName = String(device->getName().c_str());
-    String advLower = advName;
-    advLower.toLowerCase();
-    String hint = String(IOS_NAME_HINT);
-    hint.toLowerCase();
-    if(advLower == hint) {
-      bypassBackoff = true;
-    }
-  }
-
-  auto failureEntry = iosFailureTracker.find(addrKeyStd);
-  if(bypassBackoff && failureEntry != iosFailureTracker.end()) {
-    failureEntry->second.attempts = 0;
-  }
-
-  if(failureEntry != iosFailureTracker.end()) {
-    FailureRecord &record = failureEntry->second;
-    uint32_t now = millis();
-    uint32_t elapsed = now - record.lastAttemptMs;
-
-    if(elapsed >= IOS_FAILURE_RESET_MS) {
-      record.attempts = 0;
-    }
-
-    if(!bypassBackoff && record.attempts >= IOS_MAX_RETRY_PER_DEVICE) {
-      if(elapsed < IOS_RETRY_BACKOFF_MS) {
-        uint32_t remaining = IOS_RETRY_BACKOFF_MS - elapsed;
-        uint32_t remainingSeconds = (remaining + 999) / 1000;
-        Serial.println(
-          "Skipping " + addrKey + " due to repeated failures (" + String(remainingSeconds) + "s cooldown)"
-        );
-        startScan();
-        return false;
-      }
-
-      record.attempts = 0;
-    }
-  }
-
-  Serial.println("Connecting to iOS device at " + String(device->getAddress().toString().c_str()));
-
-  if(!iosClient) {
-    iosClient = NimBLEDevice::createClient();
-    iosClient->setClientCallbacks(&clientCallbacks, false);
-    iosClient->setConnectionParams(24, 48, 0, 120);
-    iosClient->setConnectTimeout(IOS_CONNECT_TIMEOUT_MS);
-  } else {
-    iosClient->setClientCallbacks(&clientCallbacks, false);
-    iosClient->setConnectionParams(24, 48, 0, 120);
-    iosClient->setConnectTimeout(IOS_CONNECT_TIMEOUT_MS);
-    if(iosClient->isConnected()) {
-      Serial.println("Already connected to iOS device");
-      return true;
-    }
-  }
-
-  if(!iosClient->connect(device)) {
-    Serial.print("Connection to iOS device failed, error=");
-    Serial.println(iosClient ? iosClient->getLastError() : -1);
-    FailureRecord &entry = iosFailureTracker[addrKeyStd];
-    if(entry.attempts < 255) {
-      entry.attempts++;
-    }
-    entry.lastAttemptMs = millis();
-    Serial.println("Failure count for " + addrKey + ": " + String(entry.attempts));
-    if(iosClient) {
-      NimBLEDevice::deleteClient(iosClient);
-      iosClient = nullptr;
-    }
-    if(bleScanner) {
-      bleScanner->clearResults();
-    }
-    startScan();
-    return false;
-  }
-
-  iosConnected = true;
-  Serial.println("Connected to iOS device");
-  lastConnectAttempt = millis();
-  iosFailureTracker.erase(addrKeyStd);
-
-  if(iosClient && !iosClient->secureConnection()) {
-    Serial.println("Failed to initiate link encryption");
-  }
-
-  bool haveAncs = setupAncs(iosClient);
-  bool haveAms = setupAms(iosClient);
-
-  if(!haveAncs && !haveAms) {
-    Serial.println("Required Apple services not available, disconnecting");
-    iosClient->disconnect();
-    iosConnected = false;
-    startScan();
-    return false;
-  }
-
-  showStatus("Connected", 1800);
-  subscribeAmsAttributes();
-  return true;
-}
-
-bool looksLikeIosDevice(const NimBLEAdvertisedDevice* device) {
-  if(!device) return false;
-  if(!device->isConnectable()) return false;
-
-  auto logDevice = [&](const String& prefix, int extra = INT32_MIN) {
-    String details = prefix;
-    std::string addrStd = device->getAddress().toString();
-    details += ": addr=";
-    details += addrStd.c_str();
-    details += " RSSI=";
-    details += String(device->getRSSI());
-    if(extra != INT32_MIN) {
-      details += " type=";
-      details += String(extra);
-    }
-    if(device->haveName()) {
-      String nameCopy(device->getName().c_str());
-      details += " name=";
-      details += nameCopy;
-    }
-    Serial.println(details);
-  };
-
-  if(device->isAdvertisingService(ANCS_SERVICE_UUID) || device->isAdvertisingService(AMS_SERVICE_UUID)) {
-    logDevice("Matches ANCS/AMS UUIDs");
-    return true;
-  }
-
-  bool appleByName = false;
-  bool blockedByName = false;
-
-  if(device->haveName()) {
-    String name = String(device->getName().c_str());
-    String lowered = name;
-    lowered.toLowerCase();
-
-    if(strlen(IOS_NAME_HINT) > 0) {
-      String hint = String(IOS_NAME_HINT);
-      hint.toLowerCase();
-      if(lowered == hint) {
-        logDevice("Matches preferred name");
-        return true;
-      }
-    }
-
-    if(lowered.indexOf("watch") >= 0 || lowered.indexOf("airpods") >= 0 || lowered.indexOf("homepod") >= 0 || lowered.indexOf("pencil") >= 0) {
-      blockedByName = true;
-    }
-
-    if(lowered.indexOf("iphone") >= 0 || lowered.indexOf("ipad") >= 0 || lowered.indexOf("ipod") >= 0 || lowered.indexOf("macbook") >= 0 || lowered.indexOf("mac ") >= 0) {
-      appleByName = true;
-    }
-
-    if(appleByName) {
-      logDevice("Matches Apple name");
-      return true;
-    }
-  }
-
-  if(device->haveManufacturerData()) {
-    std::string manufacturer = device->getManufacturerData();
-    if(manufacturer.length() >= 2) {
-      const uint8_t* data = reinterpret_cast<const uint8_t*>(manufacturer.data());
-      bool looksApple = (data[0] == 0x4C && data[1] == 0x00);
-      if(looksApple) {
-        uint8_t advType = manufacturer.length() >= 3 ? data[2] : 0xFF;
-
-        if(blockedByName) {
-          logDevice("Ignoring Apple accessory by name", advType);
-          return false;
+class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
+    void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
+        Serial.print("Advertised Device: ");
+        Serial.println(advertisedDevice->toString().c_str());
+        if (advertisedDevice->haveServiceUUID()) {
+            Serial.print("Service UUIDs: ");
+            for (int i = 0; i < advertisedDevice->getServiceUUIDCount(); i++) {
+                Serial.print(advertisedDevice->getServiceUUID(i).toString().c_str());
+                Serial.print(" ");
+            }
+            Serial.println();
         }
 
-        logDevice("Matches Apple manufacturer data", advType);
-        return true;
-      }
+        if (advertisedDevice->isAdvertisingService(ANCS_SERVICE_UUID)) {
+            Serial.println("Found an iPhone with ANCS");
+            NimBLEDevice::getScan()->stop();
+            connectToServer(advertisedDevice);
+        }
     }
-  }
+};
 
-  if(device->haveName()) {
-    logDevice("Skipping device without Apple indicators");
-  }
-
-  return false;
+static void scanEndedCB(NimBLEScanResults results) {
+    Serial.println("Scan ended; no ANCS device found.");
 }
 
-void subscribeAmsAttributes() {
-  if(!amsReady || !amsEntityUpdate || !amsEntityAttribute) return;
+void connectToServer(NimBLEAdvertisedDevice* advertisedDevice) {
+    NimBLEClient* pClient = NimBLEDevice::createClient();
+    pClient->setClientCallbacks(new ClientCallbacks());
 
-  // Request notifications for track attributes (title, artist, album)
-  uint8_t trackTitleReq[] = {0x02, 0x00, 0x80, 0x00};
-  uint8_t trackArtistReq[] = {0x02, 0x01, 0x80, 0x00};
-  uint8_t trackAlbumReq[] = {0x02, 0x02, 0x80, 0x00};
-  amsEntityUpdate->writeValue(trackTitleReq, sizeof(trackTitleReq), false);
-  amsEntityUpdate->writeValue(trackArtistReq, sizeof(trackArtistReq), false);
-  amsEntityUpdate->writeValue(trackAlbumReq, sizeof(trackAlbumReq), false);
+    if (pClient->connect(advertisedDevice)) {
+        NimBLERemoteService* pANCS = pClient->getService(ANCS_SERVICE_UUID);
+        if (pANCS) {
+            ancsControlPoint = pANCS->getCharacteristic(ANCS_CONTROL_POINT_UUID);
+            ancsDataSource = pANCS->getCharacteristic(ANCS_DATA_SOURCE_UUID);
+            NimBLERemoteCharacteristic* ancsNotificationSource = pANCS->getCharacteristic(ANCS_NOTIFICATION_SOURCE_UUID);
 
-  // Request current values for the attributes we care about.
-  uint8_t attrRequests[][2] = {
-    {0x02, 0x00},
-    {0x02, 0x01},
-    {0x02, 0x02}
-  };
+            if (ancsNotificationSource && ancsNotificationSource->canNotify()) {
+                ancsNotificationSource->subscribe(true, [](NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify){
+                    if (length >= 8) {
+                        uint32_t uid = (pData[7] << 24) | (pData[6] << 16) | (pData[5] << 8) | pData[4];
+                        requestAncsAttributes(uid);
+                    }
+                });
+            }
+            if (ancsDataSource && ancsDataSource->canNotify()) {
+                ancsDataSource->subscribe(true, [](NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify){
+                    handleAncsData(pData, length);
+                });
+            }
+        }
 
-  for(auto& req : attrRequests) {
-    amsEntityAttribute->writeValue(req, sizeof(req), true);
-  }
+        NimBLERemoteService* pAMS = pClient->getService(AMS_SERVICE_UUID);
+        if (pAMS) {
+            amsRemoteCommand = pAMS->getCharacteristic(AMS_REMOTE_COMMAND_UUID);
+            NimBLERemoteCharacteristic* amsEntityUpdate = pAMS->getCharacteristic(AMS_ENTITY_UPDATE_UUID);
+            if (amsEntityUpdate && amsEntityUpdate->canNotify()) {
+                amsEntityUpdate->subscribe(true, [](NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify){
+                    // Handle AMS entity update
+                });
+            }
+        }
+    }
 }
+
+
+
 
 void requestAncsAttributes(uint32_t uid) {
   if(!ancsReady || !ancsControlPoint) return;
@@ -693,34 +392,13 @@ void requestAncsAttributes(uint32_t uid) {
 
   payload[idx++] = 0x00; // App Identifier
   payload[idx++] = 0x01; // Title
-  payload[idx++] = 64;
-  payload[idx++] = 0;
+  payload[idx++] = 64; payload[idx++] = 0;
   payload[idx++] = 0x02; // Subtitle
-  payload[idx++] = 64;
-  payload[idx++] = 0;
+  payload[idx++] = 64; payload[idx++] = 0;
   payload[idx++] = 0x03; // Message
-  payload[idx++] = 128;
-  payload[idx++] = 0;
+  payload[idx++] = 128; payload[idx++] = 0;
 
   ancsControlPoint->writeValue(payload, idx, true);
-}
-
-void handleAncsNotification(const uint8_t* data, size_t length) {
-  if(length < 8) return;
-
-  uint8_t eventId = data[0];
-  uint8_t eventFlags = data[1];
-  (void)eventFlags;
-  uint8_t categoryId = data[2];
-  uint32_t uid = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
-
-  currentNotificationCategory = categoryId;
-
-  if(eventId == 0x00 || eventId == 0x01) { // Added or Modified
-    requestAncsAttributes(uid);
-  } else if(eventId == 0x02 && notificationActive && uid == currentNotificationUid) {
-    clearNotification();
-  }
 }
 
 void handleAncsData(const uint8_t* data, size_t length) {
@@ -728,15 +406,10 @@ void handleAncsData(const uint8_t* data, size_t length) {
   if(data[0] != 0x00) return; // Expect Get Notification Attributes response
 
   uint32_t uid = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
-  if(uid != currentNotificationUid) {
-    currentNotificationUid = uid;
-  }
+  if(uid != currentNotificationUid) currentNotificationUid = uid;
 
   size_t index = 5;
-  String appId;
-  String title;
-  String subtitle;
-  String message;
+  String appId, title, subtitle, message;
 
   while(index + 2 < length) {
     uint8_t attrId = data[index++];
@@ -747,13 +420,9 @@ void handleAncsData(const uint8_t* data, size_t length) {
     String value = "";
     if(attrLen && index + attrLen <= length) {
       value.reserve(attrLen);
-      for(uint16_t i = 0; i < attrLen; ++i) {
-        value += static_cast<char>(data[index + i]);
-      }
+      for(uint16_t i = 0; i < attrLen; ++i) value += static_cast<char>(data[index + i]);
       index += attrLen;
-    } else if(attrLen) {
-      break;
-    }
+    } else if(attrLen) break;
 
     switch(attrId) {
       case 0x00: appId = value; break;
@@ -774,9 +443,7 @@ void handleAncsData(const uint8_t* data, size_t length) {
 
   String appDisplay = appId;
   int dot = appDisplay.lastIndexOf('.');
-  if(dot >= 0 && dot + 1 < appDisplay.length()) {
-    appDisplay = appDisplay.substring(dot + 1);
-  }
+  if(dot >= 0 && dot + 1 < appDisplay.length()) appDisplay = appDisplay.substring(dot + 1);
   appDisplay.replace('_', ' ');
   appDisplay.replace('-', ' ');
 
@@ -784,46 +451,13 @@ void handleAncsData(const uint8_t* data, size_t length) {
   showNotification(displayTitle, displayMessage, appDisplay, duration);
 }
 
-void handleAmsEntityUpdate(const uint8_t* data, size_t length) {
-  if(length < 5) return;
+void showBoot(){ oledTop.clearDisplay(); oledBot.clearDisplay(); drawBottomStatic("Booting"); }
+void showReady(){ drawTopInfo(); drawBottomStatic("Ready"); }
 
-  uint8_t entityId = data[0];
-  uint8_t attributeId = data[1];
-  uint16_t valueLen = data[3] | (data[4] << 8);
-  if(5 + valueLen > length) return;
 
-  String value = "";
-  if(valueLen) {
-    value.reserve(valueLen);
-    for(uint16_t i = 0; i < valueLen; ++i) {
-      value += static_cast<char>(data[5 + i]);
-    }
-  }
 
-  if(entityId == 0x02) { // Track entity
-    if(attributeId == 0x00) {
-      song = cleanDisplayText(value);
-      scrollOffset = 0;
-      lastScroll = millis();
-      if(!notificationActive && !statusActive) {
-        drawBottomScroll();
-      }
-    } else if(attributeId == 0x01) {
-      artist = cleanDisplayText(value);
-      drawTopInfo();
-    } else if(attributeId == 0x02) {
-      album = cleanDisplayText(value);
-      drawTopInfo();
-    }
-  }
-}
 
-void sendAmsCommand(uint8_t commandId) {
-  if(!amsReady || !amsRemoteCommand) return;
-  amsRemoteCommand->writeValue(&commandId, 1, false);
-}
 
-// ===== STRING UTILITIES =====
 String cleanDisplayText(const String& input) {
   String cleaned;
   cleaned.reserve(input.length());
@@ -831,33 +465,16 @@ String cleanDisplayText(const String& input) {
   for (uint16_t i = 0; i < input.length();) {
     uint8_t byte = static_cast<uint8_t>(input.charAt(i));
 
-    if (byte == '\r' || byte == '\n') {
-      i++;
-      continue;
-    }
+    if (byte == '\r' || byte == '\n') { i++; continue; }
+    if (byte == '\t') { cleaned += ' '; i++; continue; }
 
-    if (byte == '\t') {
-      cleaned += ' ';
-      i++;
-      continue;
-    }
-
-    if (byte >= 32 && byte <= 126) {
-      cleaned += static_cast<char>(byte);
-      i++;
-      continue;
-    }
+    if (byte >= 32 && byte <= 126) { cleaned += static_cast<char>(byte); i++; continue; }
 
     if (byte >= 0x80) {
-      cleaned += '?';
-      i++;
+      cleaned += '?'; i++;
       while (i < input.length()) {
         uint8_t next = static_cast<uint8_t>(input.charAt(i));
-        if ((next & 0xC0) == 0x80) {
-          i++;
-        } else {
-          break;
-        }
+        if ((next & 0xC0) == 0x80) { i++; } else { break; }
       }
       continue;
     }
@@ -869,9 +486,130 @@ String cleanDisplayText(const String& input) {
   return cleaned;
 }
 
+static const char* gapEventTypeName(uint8_t type) {
+  switch(type) {
+    case BLE_GAP_EVENT_CONNECT: return "CONNECT";
+    case BLE_GAP_EVENT_DISCONNECT: return "DISCONNECT";
+    case BLE_GAP_EVENT_CONN_UPDATE: return "CONN_UPDATE";
+    case BLE_GAP_EVENT_CONN_UPDATE_REQ: return "CONN_UPDATE_REQ";
+    case BLE_GAP_EVENT_L2CAP_UPDATE_REQ: return "L2CAP_UPDATE_REQ";
+    case BLE_GAP_EVENT_TERM_FAILURE: return "TERM_FAILURE";
+    case BLE_GAP_EVENT_DISC: return "DISC";
+    case BLE_GAP_EVENT_DISC_COMPLETE: return "DISC_COMPLETE";
+    case BLE_GAP_EVENT_ADV_COMPLETE: return "ADV_COMPLETE";
+    case BLE_GAP_EVENT_ENC_CHANGE: return "ENC_CHANGE";
+    case BLE_GAP_EVENT_PASSKEY_ACTION: return "PASSKEY_ACTION";
+    case BLE_GAP_EVENT_MTU: return "MTU";
+    case BLE_GAP_EVENT_IDENTITY_RESOLVED: return "IDENTITY_RESOLVED";
+    case BLE_GAP_EVENT_REPEAT_PAIRING: return "REPEAT_PAIRING";
+    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE: return "PHY_UPDATE";
+    default: return "UNKNOWN";
+  }
+}
+
+int gapEventLogger(struct ble_gap_event* event, void*) {
+  if(!event) return 0;
+
+  Serial.printf("GAP event: %u (%s)\n", event->type, gapEventTypeName(event->type));
+
+  switch(event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+      if(event->connect.status != 0) {
+        const char* statusStr = NimBLEUtils::returnCodeToString(event->connect.status);
+        Serial.printf("GAP connect failed: status=%d (%s)\n",
+                      event->connect.status,
+                      statusStr);
+      } else {
+        ble_gap_conn_desc desc;
+        int rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
+        if(rc == 0) {
+          NimBLEAddress peer(desc.peer_ota_addr);
+          Serial.printf("GAP connected: handle=%u peer=%s addrType=%u\n",
+                        event->connect.conn_handle,
+                        peer.toString().c_str(),
+                        desc.peer_ota_addr.type);
+        } else {
+          Serial.printf("GAP connected: handle=%u (descriptor lookup failed rc=%d)\n",
+                        event->connect.conn_handle,
+                        rc);
+        }
+      }
+      break;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+      Serial.printf("GAP disconnected: handle=%u reason=%d (%s)\n",
+                    event->disconnect.conn.conn_handle,
+                    event->disconnect.reason,
+                    NimBLEUtils::returnCodeToString(event->disconnect.reason));
+      break;
+
+    case BLE_GAP_EVENT_CONN_UPDATE:
+      Serial.printf("GAP conn update: handle=%u status=%d (%s)\n",
+                    event->conn_update.conn_handle,
+                    event->conn_update.status,
+                    NimBLEUtils::returnCodeToString(event->conn_update.status));
+      break;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+      Serial.printf("GAP encryption change: handle=%u status=%d (%s)\n",
+                    event->enc_change.conn_handle,
+                    event->enc_change.status,
+                    NimBLEUtils::returnCodeToString(event->enc_change.status));
+      break;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+      Serial.printf("GAP passkey action: handle=%u action=%d\n",
+                    event->passkey.conn_handle,
+                    event->passkey.params.action);
+      break;
+
+    case BLE_GAP_EVENT_MTU:
+      Serial.printf("GAP MTU updated: handle=%u channel=%u mtu=%u\n",
+                    event->mtu.conn_handle,
+                    event->mtu.channel_id,
+                    event->mtu.value);
+      break;
+
+    case BLE_GAP_EVENT_DISC_COMPLETE:
+      Serial.printf("GAP discovery complete: reason=%d (%s)\n",
+                    event->disc_complete.reason,
+                    NimBLEUtils::returnCodeToString(event->disc_complete.reason));
+      break;
+
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+      Serial.printf("GAP adv complete: reason=%d (%s)\n",
+                    event->adv_complete.reason,
+                    NimBLEUtils::returnCodeToString(event->adv_complete.reason));
+      break;
+
+    default:
+      break;
+  }
+
+  return 0;
+}
+
+
+
+
+
+
+
 // ===== SETUP =====
 void setup(){
   Serial.begin(115200);
+  esp_log_level_set("ble_hs", ESP_LOG_DEBUG);
+  esp_log_level_set("ble_gap", ESP_LOG_DEBUG);
+  esp_log_level_set("ble_hs_hci", ESP_LOG_DEBUG);
+
+  // Turn off Wi-Fi cleanly on ESP32 (no ESP8266 forceSleepBegin here)
+  WiFi.mode(WIFI_OFF);
+
+#if defined(CONFIG_BT_NIMBLE_ROLE_CENTRAL)
+  esp_err_t privacyRc = esp_ble_gap_config_local_privacy(true);
+  Serial.printf("Local privacy config: rc=%d\n", privacyRc);
+#endif
+
   pinMode(JOY_SW_PIN, INPUT_PULLUP);
   analogReadResolution(12);
   WireTop.begin(TOP_SDA, TOP_SCL);
@@ -880,32 +618,48 @@ void setup(){
   oledTop.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
   oledBot.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
 
-  NimBLEDevice::init("JuiceBox Remote");
+  NimBLEDevice::init("Remote");
+  NimBLEDevice::setMTU(185);
+
+  // Keep bonds so iOS trusts us after first pairing.
+  // clearBonds(); // leave commented
+
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-#ifdef BLE_OWN_ADDR_RANDOM
-  if(!NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM)) {
-    Serial.println("Failed to select random address type, continuing with default");
-  }
+  if(privacyRc == ESP_OK) {
+#if defined(BLE_OWN_ADDR_RPA_RANDOM_DEFAULT)
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RPA_RANDOM_DEFAULT);
+#elif defined(BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT)
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT);
+#elif defined(BLE_OWN_ADDR_RANDOM)
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
 #endif
+  } else {
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
+  }
   NimBLEDevice::setSecurityAuth(true, false, true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   uint8_t keyMask = securityKeyMask();
   NimBLEDevice::setSecurityInitKey(keyMask);
   NimBLEDevice::setSecurityRespKey(keyMask);
-
-  bleScanner = NimBLEDevice::getScan();
-  bleScanner->setScanCallbacks(&advertisedDeviceCallbacks, false);
-  bleScanner->setInterval(45);
-  bleScanner->setWindow(30);
-  bleScanner->setActiveScan(true);
+  NimBLEDevice::setCustomGapHandler(gapEventLogger);
+  Serial.println("GAP event logger registered");
 
   showBoot();
   calibrateCenter();
   showStatus("Scanning", 0);
-  startScan();
+
+  NimBLEScan* pScan = NimBLEDevice::getScan();
+  pScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks());
+  pScan->setActiveScan(true);
+  pScan->start(0, scanEndedCB);
 }
 
 // ===== LOOP =====
+void sendAmsCommand(uint8_t commandId) {
+  if(!amsReady || !amsRemoteCommand) return;
+  amsRemoteCommand->writeValue(&commandId, 1, false);
+}
+
 void loop(){
   uint32_t now = millis();
 
@@ -922,40 +676,46 @@ void loop(){
     }
   }
 
-  if(!iosConnected) {
-    if(bleScanner && !bleScanner->isScanning() && (now - lastConnectAttempt > 5000)) {
-      startScan();
-    }
-
-    if(now - lastConnectAttempt > 60000) {
-      Serial.println("Still looking for iOS device...");
-      showStatus("Scanning", 1500);
-      lastConnectAttempt = now;
-    }
-  } else {
-    lastConnectAttempt = now;
-  }
+  if (iosConnected) lastConnectAttempt = now;
 
   if(song.length() > 0 && !notificationActive && !statusActive) {
     drawBottomScroll();
   }
 
   smoothRead();
-  bool btn = (digitalRead(JOY_SW_PIN) == LOW);
-  if(btn && (now - tBtn > 280)){
+
+  bool btnDown = (digitalRead(JOY_SW_PIN) == LOW);
+  if(btnDown && !btnWasDown) {
+    btnDownAt = now;
+  }
+
+  if(btnDown && (now - btnDownAt > BOND_CLEAR_HOLD_MS)) {
+    // Long press: forget bonds and restart discovery.
+    Serial.println("Long press detected.");
+    while(digitalRead(JOY_SW_PIN) == LOW) delay(20);
+    btnWasDown = false;
+    btnDownAt = millis();
+    tBtn = now;
+    delay(6);
+    return;
+  }
+
+  btnWasDown = btnDown;
+
+  if(btnDown && (now - tBtn > 280)){
     Serial.println("Button pressed");
     tBtn = now;
     sendAmsCommand(AMS_CMD_TOGGLE_PLAY_PAUSE);
     showStatus("Play/Pause", 800);
   }
 
-  if(!inDZ(emaX) && beyond(emaX)){
-    if(emaX>0 && now-tUp>VOL_REPEAT_MS){
+  if(!inDZ(emaY) && beyond(emaY)){
+    if(emaY<0 && now-tUp>VOL_REPEAT_MS){
       Serial.println("Joystick right");
       sendAmsCommand(AMS_CMD_VOLUME_UP);
       showStatus("Vol +", 600);
       tUp=now;
-    } else if(emaX<0 && now-tDn>VOL_REPEAT_MS){
+    } else if(emaY>0 && now-tDn>VOL_REPEAT_MS){
       Serial.println("Joystick left");
       sendAmsCommand(AMS_CMD_VOLUME_DOWN);
       showStatus("Vol -", 600);
@@ -963,13 +723,13 @@ void loop(){
     }
   }
 
-  if(!inDZ(emaY) && beyond(emaY)){
-    if(emaY>0 && now-tR>ACTION_COOLDOWN){
+  if(!inDZ(emaX) && beyond(emaX)){
+    if(emaX<0 && now-tR>ACTION_COOLDOWN){
       Serial.println("Joystick down");
       sendAmsCommand(AMS_CMD_NEXT_TRACK);
       showStatus("Next >", 800);
       tR=now;
-    } else if(emaY<0 && now-tL>ACTION_COOLDOWN){
+    } else if(emaX>0 && now-tL>ACTION_COOLDOWN){
       Serial.println("Joystick up");
       sendAmsCommand(AMS_CMD_PREVIOUS_TRACK);
       showStatus("< Prev", 800);
