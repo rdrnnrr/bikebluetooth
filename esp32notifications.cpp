@@ -18,7 +18,10 @@
 #include "BLEUtils.h"
 #include "BLE2902.h"
 
+#include <esp_err.h>
+#include <esp_gap_ble_api.h>
 #include <esp_gatts_api.h>
+#include <cstring>
 
 static char LOG_TAG[] = "BLENotifications";
 
@@ -40,10 +43,12 @@ void startClientTasks(void * params) {
 	BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
 	BLEDevice::setSecurityCallbacks(new NotificationSecurityCallbacks()); // @todo memory leak?
 
-	BLESecurity *pSecurity = new BLESecurity();
-	pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
-	pSecurity->setCapability(ESP_IO_CAP_IO);
-	pSecurity->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+        BLESecurity *pSecurity = new BLESecurity();
+        pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+        pSecurity->setCapability(ESP_IO_CAP_NONE);
+        pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+        pSecurity->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+        pSecurity->setKeySize(16);
 	// Connect to the remove BLE Server.
 	pClient->connect(*taskData->address);
 	taskData->instance->clientANCS->setup(pClient);
@@ -76,16 +81,27 @@ public:
 		ESP_LOGI(LOG_TAG, "Device connected");
 		gatts_connect_evt_param * connectEventParam = (gatts_connect_evt_param *) param;
 
-		pinnedTaskClosure_t *taskData = new pinnedTaskClosure_t();  // @todo memory leaks?
-		BLEAddress *address = new BLEAddress(connectEventParam->remote_bda);
-		taskData->address = address;
-		taskData->instance = instance;
+                pinnedTaskClosure_t *taskData = new pinnedTaskClosure_t();  // @todo memory leaks?
+                BLEAddress *address = new BLEAddress(connectEventParam->remote_bda);
+                taskData->address = address;
+                taskData->instance = instance;
 
-	    ::xTaskCreatePinnedToCore(&startClientTasks, "ClientStarterTask", 10000, taskData, 5, &instance->clientANCS->clientTaskHandle, 0);
-		
-		delay(1000);
-		
-		ESP_LOGI(LOG_TAG, "Set up client");
+        esp_ble_conn_update_params_t params = {};
+        std::memcpy(params.bda, connectEventParam->remote_bda, sizeof(esp_bd_addr_t));
+        params.latency = 0;
+        params.min_int = 24;
+        params.max_int = 40;
+        params.timeout = 100;
+        esp_err_t updateResult = esp_ble_gap_update_conn_params(&params);
+        if (updateResult != ESP_OK) {
+                ESP_LOGW(LOG_TAG, "Failed to request connection params: %d", updateResult);
+        }
+
+            ::xTaskCreatePinnedToCore(&startClientTasks, "ClientStarterTask", 10000, taskData, 5, &instance->clientANCS->clientTaskHandle, 0);
+
+                delay(1000);
+
+                ESP_LOGI(LOG_TAG, "Set up client");
 		
         if (instance->cbStateChanged) {
         	instance->cbStateChanged(BLENotifications::StateConnected, instance->cbStateChangedUserData);
@@ -127,13 +143,17 @@ const char * BLENotifications::getNotificationCategoryDescription(NotificationCa
 }
 
 void BLENotifications::begin(const char * name) {
-	ESP_LOGI(LOG_TAG, "begin()");
+        ESP_LOGI(LOG_TAG, "begin()");
     BLEDevice::init(name);
+        esp_err_t privacyResult = esp_ble_gap_config_local_privacy(true);
+        if (privacyResult != ESP_OK) {
+                ESP_LOGW(LOG_TAG, "Failed to enable local privacy: %d", privacyResult);
+        }
     server = BLEDevice::createServer();
     server->setCallbacks(new MyServerCallbacks(this));
     BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
-	BLEDevice::setSecurityCallbacks(new NotificationSecurityCallbacks()); // @todo memory leak?
-	
+        BLEDevice::setSecurityCallbacks(new NotificationSecurityCallbacks()); // @todo memory leak?
+
 	startAdvertising();
 }
 
@@ -195,9 +215,11 @@ void BLENotifications::startAdvertising() {
 
     // Set security
     BLESecurity *pSecurity = new BLESecurity();
-    pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND);
-    pSecurity->setCapability(ESP_IO_CAP_OUT);
+    pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+    pSecurity->setCapability(ESP_IO_CAP_NONE);
     pSecurity->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+    pSecurity->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+    pSecurity->setKeySize(16);
 
     //Start advertising
     pAdvertising->start();
