@@ -15,8 +15,6 @@
 #include <math.h>
 #include <cstring>
 #include <string>
-#include <vector>
-#include <algorithm>
 
 // =================== Pins & Display ===================
 #define JOY_X_PIN   34
@@ -71,13 +69,9 @@ bool     connectPending   = false;          // request a client connect in loop
 NimBLEAdvertisedDevice* gPendingDev = nullptr; // heap copy of advertised device
 
 const uint32_t CONNECT_BACKOFF_MS = 8000;   // wait before retrying a failed peer
-struct FailedPeer {
-  String address;
-  uint32_t retryUntil;
-  FailedPeer(const String& addr, uint32_t until)
-      : address(addr), retryUntil(until) {}
-};
-std::vector<FailedPeer> gFailedPeers;
+bool gBackoffActive = false;
+std::string gBackoffAddr;
+uint32_t gBackoffUntil = 0;
 
 // AMS/ANCS handles
 NimBLERemoteCharacteristic* chAmsCmd   = nullptr;
@@ -171,52 +165,41 @@ void showNotif(const String& title, const String& body, const String& app, uint3
 }
 void clearNotif() { notifActive=false; notifTitle=""; notifMsg=""; notifApp=""; notifUntil=0; }
 
-void pruneFailedPeers(uint32_t now) {
-  if (gFailedPeers.empty()) return;
-  gFailedPeers.erase(
-      std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
-                     [now](const FailedPeer& peer) { return now >= peer.retryUntil; }),
-      gFailedPeers.end());
+static inline bool timeReached(uint32_t now, uint32_t target) {
+  return (int32_t)(now - target) >= 0;
 }
 
-bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
-  if (!dev) return false;
+void clearBackoff() {
+  gBackoffActive = false;
+  gBackoffAddr.clear();
+  gBackoffUntil = 0;
+}
+
+bool backoffBlocks(const NimBLEAdvertisedDevice* dev) {
+  if (!gBackoffActive || !dev) return false;
+  if (gLink.serverLinked) return false;
+
   uint32_t now = millis();
-  pruneFailedPeers(now);
-  String addr = String(dev->getAddress().toString().c_str());
-  for (const auto& peer : gFailedPeers) {
-    if (peer.address == addr) {
-      return true;
-    }
+  if (timeReached(now, gBackoffUntil)) {
+    clearBackoff();
+    return false;
+  }
+
+  std::string addr = dev->getAddress().toString();
+  if (addr == gBackoffAddr) {
+    uint32_t remaining = gBackoffUntil - now;
+    Serial.printf("[SCAN] Skipping Apple device %s (retry in %lu ms)\n",
+                  addr.c_str(), (unsigned long)remaining);
+    return true;
   }
   return false;
 }
 
-void rememberFailure(const NimBLEAdvertisedDevice* dev) {
+void setBackoffFor(const NimBLEAdvertisedDevice* dev) {
   if (!dev) return;
-  uint32_t now = millis();
-  pruneFailedPeers(now);
-  String addr = String(dev->getAddress().toString().c_str());
-  bool updated = false;
-  for (auto& peer : gFailedPeers) {
-    if (peer.address == addr) {
-      peer.retryUntil = now + CONNECT_BACKOFF_MS;
-      updated = true;
-      break;
-    }
-  }
-  if (!updated) {
-    gFailedPeers.emplace_back(addr, now + CONNECT_BACKOFF_MS);
-  }
-}
-
-void clearFailureFor(const NimBLEAdvertisedDevice* dev) {
-  if (!dev || gFailedPeers.empty()) return;
-  String addr = String(dev->getAddress().toString().c_str());
-  gFailedPeers.erase(
-      std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
-                     [&addr](const FailedPeer& peer) { return peer.address == addr; }),
-      gFailedPeers.end());
+  gBackoffActive = true;
+  gBackoffAddr = dev->getAddress().toString();
+  gBackoffUntil = millis() + CONNECT_BACKOFF_MS;
 }
 
 // =================== Display ===================
@@ -438,7 +421,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     gLink.serverLinked = true;
     gPeerAddr = connInfo.getAddress();
     havePeerAddr = true;
-    gFailedPeers.clear();
+    clearBackoff();
     Serial.printf("iPhone connected to our peripheral (handle=%u)\n", connInfo.getConnHandle());
     setStatus("Securing...", 1200);
     NimBLEDevice::startSecurity(connInfo.getConnHandle());
@@ -452,7 +435,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onAuthenticationComplete(NimBLEConnInfo& /*connInfo*/) override {
     Serial.println("Link encrypted. Scanning to back-connect...");
-    gFailedPeers.clear();
+    clearBackoff();
     // Use scan (connectable + Apple mfg) to get a proper RPA + type
     scheduleScanStart(200);
   }
@@ -479,9 +462,7 @@ class ScanCallbacks : public NimBLEScanCallbacks {
     }
     // Else Apple device (likely your iPhone)
     if (dev->haveManufacturerData() && isApple(dev->getManufacturerData())) {
-      if (!gLink.serverLinked && recentlyFailed(dev)) {
-        Serial.printf("[SCAN] Skipping Apple device %s (recent failure)\n",
-                      dev->getAddress().toString().c_str());
+      if (backoffBlocks(dev)) {
         return;
       }
       Serial.printf("[SCAN] Found Apple device %s; scheduling connect\n", dev->getAddress().toString().c_str());
@@ -615,7 +596,7 @@ void loop(){
       if (ok) {
         Serial.println("[CLIENT] Connected; discovering AMS/ANCS...");
 
-        clearFailureFor(gPendingDev);
+        clearBackoff();
 
         gLink.clientLinked = true;
         gLink.amsReady = gLink.ancsReady = false;
@@ -670,7 +651,7 @@ void loop(){
         scheduleScanStart(1000);
       } else {
         Serial.println("Back-connect failed; will scan");
-        rememberFailure(gPendingDev);
+        setBackoffFor(gPendingDev);
         scheduleScanStart(400);
       }
       delete gPendingDev; gPendingDev=nullptr;
