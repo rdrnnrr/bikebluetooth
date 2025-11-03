@@ -12,6 +12,11 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <NimBLEDevice.h>
+#if defined(CONFIG_NIMBLE_CPP_IDF)
+#include "host/ble_gap.h"
+#else
+#include "nimble/nimble/host/include/host/ble_gap.h"
+#endif
 #include <math.h>
 #include <cstring>
 #include <string>
@@ -58,7 +63,9 @@ NimBLEClient* gClient = nullptr;
 NimBLEScan*   gScan   = nullptr;
 
 NimBLEAddress gPeerAddr;      // learned from server-side connection
+NimBLEAddress gPeerIdAddr;    // resolved identity address (stable)
 bool          havePeerAddr = false;
+bool          havePeerIdAddr = false;
 
 // Safe scanner/connect scheduling
 bool     scanStartPending = false;
@@ -378,7 +385,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     gLink.serverLinked = true;
     gPeerAddr = connInfo.getAddress();
-    havePeerAddr = true;
+    gPeerIdAddr = connInfo.getIdAddress();
+    havePeerAddr = !gPeerAddr.isNull();
+    havePeerIdAddr = !gPeerIdAddr.isNull();
     Serial.printf("iPhone connected to our peripheral (handle=%u)\n", connInfo.getConnHandle());
     setStatus("Securing...", 1200);
     NimBLEDevice::startSecurity(connInfo.getConnHandle());
@@ -390,8 +399,21 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     setStatus("Advertising", 0);
     pServer->getAdvertising()->start();
   }
-  void onAuthenticationComplete(NimBLEConnInfo& /*connInfo*/) override {
+  void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
     Serial.println("Link encrypted. Scanning to back-connect...");
+    NimBLEAddress idAddr = connInfo.getIdAddress();
+    if (!idAddr.isNull()) {
+      gPeerIdAddr = idAddr;
+      havePeerIdAddr = true;
+      if (NimBLEDevice::whiteListAdd(gPeerIdAddr)) {
+        Serial.printf("[SCAN] Using whitelist for %s\n", gPeerIdAddr.toString().c_str());
+        if (gScan) {
+          gScan->setFilterPolicy(BLE_HCI_SCAN_FILT_USE_WL);
+        }
+      } else if (gScan) {
+        gScan->setFilterPolicy(BLE_HCI_SCAN_FILT_NO_WL);
+      }
+    }
     // Use scan (connectable + Apple mfg) to get a proper RPA + type
     scheduleScanStart(200);
   }
@@ -501,6 +523,7 @@ void setup(){
   gScan->setInterval(45);
   gScan->setWindow(30);
   gScan->setActiveScan(true);
+  gScan->setFilterPolicy(BLE_HCI_SCAN_FILT_NO_WL);
 
   calibrateCenter();
   setStatus("Advertising", 0);
@@ -617,6 +640,13 @@ void loop(){
   if (btnDown && (now - btnDownAt > BOND_CLEAR_HOLD_MS)) {
     Serial.println("Long press: Clearing bonds + restart");
     NimBLEDevice::deleteAllBonds();
+    if (havePeerIdAddr) {
+      NimBLEDevice::whiteListRemove(gPeerIdAddr);
+    }
+    havePeerAddr = havePeerIdAddr = false;
+    if (gScan) {
+      gScan->setFilterPolicy(BLE_HCI_SCAN_FILT_NO_WL);
+    }
     setStatus("Bonds cleared", 1200);
     refreshDisplay();
     delay(1200);
