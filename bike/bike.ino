@@ -530,6 +530,18 @@ void loop(){
 
   // Handle requested client connect using the COPIED advertised device
   if (connectPending) {
+    // Wait until the scanner is fully stopped before attempting to connect.
+    // NimBLE's stop() request is asynchronous and trying to open a connection
+    // while the controller is still cancelling the scan leads to immediate
+    // failures on iOS. When we get here while still scanning, issue/ensure the
+    // stop request and try again on the next loop iteration.
+    if (gScan->isScanning()) {
+      if (!scanStopPending) {
+        gScan->stop();
+      }
+      return;
+    }
+
     connectPending = false;
 
     if (!gPendingDev) {
