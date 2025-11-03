@@ -68,6 +68,11 @@ bool     scanStopPending  = false;
 bool     connectPending   = false;          // request a client connect in loop
 NimBLEAdvertisedDevice* gPendingDev = nullptr; // heap copy of advertised device
 
+const uint32_t CONNECT_BACKOFF_MS = 8000;   // wait before retrying a failed peer
+bool gBackoffActive = false;
+std::string gBackoffAddr;
+uint32_t gBackoffUntil = 0;
+
 // AMS/ANCS handles
 NimBLERemoteCharacteristic* chAmsCmd   = nullptr;
 NimBLERemoteCharacteristic* chAmsUpd   = nullptr;
@@ -159,6 +164,43 @@ void showNotif(const String& title, const String& body, const String& app, uint3
   notifUntil = ms ? millis()+ms : 0;
 }
 void clearNotif() { notifActive=false; notifTitle=""; notifMsg=""; notifApp=""; notifUntil=0; }
+
+static inline bool timeReached(uint32_t now, uint32_t target) {
+  return (int32_t)(now - target) >= 0;
+}
+
+void clearBackoff() {
+  gBackoffActive = false;
+  gBackoffAddr.clear();
+  gBackoffUntil = 0;
+}
+
+bool backoffBlocks(const NimBLEAdvertisedDevice* dev) {
+  if (!gBackoffActive || !dev) return false;
+  if (gLink.serverLinked) return false;
+
+  uint32_t now = millis();
+  if (timeReached(now, gBackoffUntil)) {
+    clearBackoff();
+    return false;
+  }
+
+  std::string addr = dev->getAddress().toString();
+  if (addr == gBackoffAddr) {
+    uint32_t remaining = gBackoffUntil - now;
+    Serial.printf("[SCAN] Skipping Apple device %s (retry in %lu ms)\n",
+                  addr.c_str(), (unsigned long)remaining);
+    return true;
+  }
+  return false;
+}
+
+void setBackoffFor(const NimBLEAdvertisedDevice* dev) {
+  if (!dev) return;
+  gBackoffActive = true;
+  gBackoffAddr = dev->getAddress().toString();
+  gBackoffUntil = millis() + CONNECT_BACKOFF_MS;
+}
 
 // =================== Display ===================
 void drawTopNowPlaying() {
@@ -379,6 +421,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     gLink.serverLinked = true;
     gPeerAddr = connInfo.getAddress();
     havePeerAddr = true;
+    clearBackoff();
     Serial.printf("iPhone connected to our peripheral (handle=%u)\n", connInfo.getConnHandle());
     setStatus("Securing...", 1200);
     NimBLEDevice::startSecurity(connInfo.getConnHandle());
@@ -392,6 +435,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onAuthenticationComplete(NimBLEConnInfo& /*connInfo*/) override {
     Serial.println("Link encrypted. Scanning to back-connect...");
+    clearBackoff();
     // Use scan (connectable + Apple mfg) to get a proper RPA + type
     scheduleScanStart(200);
   }
@@ -418,6 +462,9 @@ class ScanCallbacks : public NimBLEScanCallbacks {
     }
     // Else Apple device (likely your iPhone)
     if (dev->haveManufacturerData() && isApple(dev->getManufacturerData())) {
+      if (backoffBlocks(dev)) {
+        return;
+      }
       Serial.printf("[SCAN] Found Apple device %s; scheduling connect\n", dev->getAddress().toString().c_str());
       if (gPendingDev) { delete gPendingDev; gPendingDev = nullptr; }
       gPendingDev = new NimBLEAdvertisedDevice(*dev); // COPY
@@ -549,6 +596,8 @@ void loop(){
       if (ok) {
         Serial.println("[CLIENT] Connected; discovering AMS/ANCS...");
 
+        clearBackoff();
+
         gLink.clientLinked = true;
         gLink.amsReady = gLink.ancsReady = false;
         chAmsCmd = chAmsUpd = chAmsAttr = nullptr;
@@ -602,6 +651,7 @@ void loop(){
         scheduleScanStart(1000);
       } else {
         Serial.println("Back-connect failed; will scan");
+        setBackoffFor(gPendingDev);
         scheduleScanStart(400);
       }
       delete gPendingDev; gPendingDev=nullptr;
