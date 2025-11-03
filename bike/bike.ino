@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // =================== Pins & Display ===================
 #define JOY_X_PIN   34
@@ -78,6 +80,26 @@ struct FailedPeer {
       : address(addr), retryUntil(until) {}
 };
 std::vector<FailedPeer> gFailedPeers;
+SemaphoreHandle_t gFailedPeersMutex = nullptr;
+
+class MutexLock {
+ public:
+  explicit MutexLock(SemaphoreHandle_t mutex) : mMutex(mutex), mLocked(false) {
+    if (mMutex) {
+      mLocked = xSemaphoreTake(mMutex, portMAX_DELAY) == pdTRUE;
+    }
+  }
+  ~MutexLock() {
+    if (mLocked) {
+      xSemaphoreGive(mMutex);
+    }
+  }
+  bool locked() const { return mLocked; }
+
+ private:
+  SemaphoreHandle_t mMutex;
+  bool mLocked;
+};
 
 // AMS/ANCS handles
 NimBLERemoteCharacteristic* chAmsCmd   = nullptr;
@@ -171,7 +193,7 @@ void showNotif(const String& title, const String& body, const String& app, uint3
 }
 void clearNotif() { notifActive=false; notifTitle=""; notifMsg=""; notifApp=""; notifUntil=0; }
 
-void pruneFailedPeers(uint32_t now) {
+void pruneFailedPeersLocked(uint32_t now) {
   if (gFailedPeers.empty()) return;
   gFailedPeers.erase(
       std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
@@ -179,10 +201,18 @@ void pruneFailedPeers(uint32_t now) {
       gFailedPeers.end());
 }
 
+void pruneFailedPeers(uint32_t now) {
+  MutexLock lock(gFailedPeersMutex);
+  if (!lock.locked()) return;
+  pruneFailedPeersLocked(now);
+}
+
 bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
   if (!dev) return false;
+  MutexLock lock(gFailedPeersMutex);
+  if (!lock.locked()) return false;
   uint32_t now = millis();
-  pruneFailedPeers(now);
+  pruneFailedPeersLocked(now);
   String addr = String(dev->getAddress().toString().c_str());
   for (const auto& peer : gFailedPeers) {
     if (peer.address == addr) {
@@ -194,8 +224,10 @@ bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
 
 void rememberFailure(const NimBLEAdvertisedDevice* dev) {
   if (!dev) return;
+  MutexLock lock(gFailedPeersMutex);
+  if (!lock.locked()) return;
   uint32_t now = millis();
-  pruneFailedPeers(now);
+  pruneFailedPeersLocked(now);
   String addr = String(dev->getAddress().toString().c_str());
   bool updated = false;
   for (auto& peer : gFailedPeers) {
@@ -211,7 +243,9 @@ void rememberFailure(const NimBLEAdvertisedDevice* dev) {
 }
 
 void clearFailureFor(const NimBLEAdvertisedDevice* dev) {
-  if (!dev || gFailedPeers.empty()) return;
+  if (!dev) return;
+  MutexLock lock(gFailedPeersMutex);
+  if (!lock.locked() || gFailedPeers.empty()) return;
   String addr = String(dev->getAddress().toString().c_str());
   gFailedPeers.erase(
       std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
@@ -512,6 +546,11 @@ void smoothRead() {
 // =================== Setup ===================
 void setup(){
   Serial.begin(115200);
+
+  gFailedPeersMutex = xSemaphoreCreateMutex();
+  if (!gFailedPeersMutex) {
+    Serial.println("[ERROR] Failed to create failed peer mutex");
+  }
 
   pinMode(JOY_SW_PIN, INPUT_PULLUP);
   analogReadResolution(12);
