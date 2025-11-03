@@ -423,6 +423,8 @@ void scheduleScanStop() {
 class ClientCallbacks : public NimBLEClientCallbacks {
   void onConnect(NimBLEClient* pClient) override {
     gLink.clientLinked = true;
+    scanStartPending = false;
+    scheduleScanStop();
     Serial.println("[CLIENT] Connected");
   }
   void onDisconnect(NimBLEClient* pClient, int reason) override {
@@ -430,6 +432,7 @@ class ClientCallbacks : public NimBLEClientCallbacks {
     gLink.amsReady = false;
     gLink.ancsReady = false;
     Serial.printf("[CLIENT] Disconnected, reason=%d\n", reason);
+    scheduleScanStart(600);
   }
 };
 
@@ -467,6 +470,7 @@ class ScanCallbacks : public NimBLEScanCallbacks {
   }
   void onDiscovered(const NimBLEAdvertisedDevice* dev) override {
     if (!dev->isConnectable()) return;
+    if (gLink.clientLinked) return;
 
     // Prefer exact peer address if we have it
     if (havePeerAddr && dev->getAddress().equals(gPeerAddr)) {
@@ -665,9 +669,6 @@ void loop(){
         Serial.printf("[CLIENT] Ready AMS:%d ANCS:%d\n", gLink.amsReady, gLink.ancsReady);
         setStatus("iPhone linked", 1200);
         refreshDisplay();
-
-        // Keep scanning (address may rotate); harmless
-        scheduleScanStart(1000);
       } else {
         Serial.println("Back-connect failed; will scan");
         rememberFailure(gPendingDev);
