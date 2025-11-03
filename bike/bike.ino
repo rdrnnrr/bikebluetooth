@@ -15,6 +15,8 @@
 #include <math.h>
 #include <cstring>
 #include <string>
+#include <vector>
+#include <algorithm>
 
 // =================== Pins & Display ===================
 #define JOY_X_PIN   34
@@ -59,6 +61,8 @@ NimBLEScan*   gScan   = nullptr;
 
 NimBLEAddress gPeerAddr;      // learned from server-side connection
 bool          havePeerAddr = false;
+String        gLastClientAddr; // last known client-side peer address
+bool          haveClientAddr = false;
 
 // Safe scanner/connect scheduling
 bool     scanStartPending = false;
@@ -67,6 +71,15 @@ bool     scanStopPending  = false;
 
 bool     connectPending   = false;          // request a client connect in loop
 NimBLEAdvertisedDevice* gPendingDev = nullptr; // heap copy of advertised device
+
+const uint32_t CONNECT_BACKOFF_MS = 8000;   // wait before retrying a failed peer
+struct FailedPeer {
+  String address;
+  uint32_t retryUntil;
+  FailedPeer(const String& addr, uint32_t until)
+      : address(addr), retryUntil(until) {}
+};
+std::vector<FailedPeer> gFailedPeers;
 
 // AMS/ANCS handles
 NimBLERemoteCharacteristic* chAmsCmd   = nullptr;
@@ -159,6 +172,81 @@ void showNotif(const String& title, const String& body, const String& app, uint3
   notifUntil = ms ? millis()+ms : 0;
 }
 void clearNotif() { notifActive=false; notifTitle=""; notifMsg=""; notifApp=""; notifUntil=0; }
+
+void pruneFailedPeers(uint32_t now) {
+  if (gFailedPeers.empty()) return;
+  gFailedPeers.erase(
+      std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
+                     [now](const FailedPeer& peer) { return now >= peer.retryUntil; }),
+      gFailedPeers.end());
+}
+
+static String addrToString(const NimBLEAdvertisedDevice* dev) {
+  if (!dev) return String("");
+  return String(dev->getAddress().toString().c_str());
+}
+
+bool matchesClientAddr(const NimBLEAdvertisedDevice* dev) {
+  if (!dev) return false;
+  if (havePeerAddr && dev->getAddress().equals(gPeerAddr)) return true;
+  if (haveClientAddr) {
+    String addr = addrToString(dev);
+    if (addr.equalsIgnoreCase(gLastClientAddr)) return true;
+  }
+  return false;
+}
+
+bool advertHasOurService(const NimBLEAdvertisedDevice* dev) {
+  if (!dev) return false;
+  if (dev->isAdvertisingService(UUID_AMS_SVC) || dev->isAdvertisingService(UUID_ANCS_SVC)) return true;
+  const std::vector<NimBLEUUID>* uuids = dev->getServiceUUIDs();
+  if (uuids) {
+    for (const auto& uuid : *uuids) {
+      if (uuid.equals(UUID_AMS_SVC) || uuid.equals(UUID_ANCS_SVC)) return true;
+    }
+  }
+  return false;
+}
+
+bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
+  if (!dev) return false;
+  uint32_t now = millis();
+  pruneFailedPeers(now);
+  String addr = addrToString(dev);
+  for (const auto& peer : gFailedPeers) {
+    if (peer.address == addr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void rememberFailure(const NimBLEAdvertisedDevice* dev) {
+  if (!dev) return;
+  uint32_t now = millis();
+  pruneFailedPeers(now);
+  String addr = addrToString(dev);
+  bool updated = false;
+  for (auto& peer : gFailedPeers) {
+    if (peer.address == addr) {
+      peer.retryUntil = now + CONNECT_BACKOFF_MS;
+      updated = true;
+      break;
+    }
+  }
+  if (!updated) {
+    gFailedPeers.emplace_back(addr, now + CONNECT_BACKOFF_MS);
+  }
+}
+
+void clearFailureFor(const NimBLEAdvertisedDevice* dev) {
+  if (!dev || gFailedPeers.empty()) return;
+  String addr = addrToString(dev);
+  gFailedPeers.erase(
+      std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
+                     [&addr](const FailedPeer& peer) { return peer.address == addr; }),
+      gFailedPeers.end());
+}
 
 // =================== Display ===================
 void drawTopNowPlaying() {
@@ -371,6 +459,9 @@ class ClientCallbacks : public NimBLEClientCallbacks {
     gLink.amsReady = false;
     gLink.ancsReady = false;
     Serial.printf("[CLIENT] Disconnected, reason=%d\n", reason);
+    if (gLink.serverLinked) {
+      scheduleScanStart(500);
+    }
   }
 };
 
@@ -379,12 +470,17 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     gLink.serverLinked = true;
     gPeerAddr = connInfo.getAddress();
     havePeerAddr = true;
+    gFailedPeers.clear();
+    if (!haveClientAddr) gLastClientAddr = String("");
     Serial.printf("iPhone connected to our peripheral (handle=%u)\n", connInfo.getConnHandle());
     setStatus("Securing...", 1200);
     NimBLEDevice::startSecurity(connInfo.getConnHandle());
   }
   void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
     gLink.serverLinked = false;
+    havePeerAddr = false;
+    haveClientAddr = false;
+    gLastClientAddr = String("");
     Serial.printf("iPhone disconnected (server), reason=%d\n", reason);
     clearNotif();
     setStatus("Advertising", 0);
@@ -392,6 +488,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onAuthenticationComplete(NimBLEConnInfo& /*connInfo*/) override {
     Serial.println("Link encrypted. Scanning to back-connect...");
+    gFailedPeers.clear();
     // Use scan (connectable + Apple mfg) to get a proper RPA + type
     scheduleScanStart(200);
   }
@@ -406,24 +503,40 @@ class ScanCallbacks : public NimBLEScanCallbacks {
   }
   void onDiscovered(const NimBLEAdvertisedDevice* dev) override {
     if (!dev->isConnectable()) return;
+    if (gLink.clientLinked || connectPending) return;
 
-    // Prefer exact peer address if we have it
-    if (havePeerAddr && dev->getAddress().equals(gPeerAddr)) {
-      Serial.println("[SCAN] Found same iPhone address; scheduling connect");
+    bool knownAddr = matchesClientAddr(dev);
+    bool hasOurService = advertHasOurService(dev);
+    bool isAppleMfg = dev->haveManufacturerData() && isApple(dev->getManufacturerData());
+
+    if (knownAddr) {
+      Serial.println("[SCAN] Found known iPhone address; scheduling connect");
       if (gPendingDev) { delete gPendingDev; gPendingDev = nullptr; }
       gPendingDev = new NimBLEAdvertisedDevice(*dev); // COPY (keeps addr type)
       scheduleScanStop();
       connectPending = true;
       return;
     }
-    // Else Apple device (likely your iPhone)
-    if (dev->haveManufacturerData() && isApple(dev->getManufacturerData())) {
-      Serial.printf("[SCAN] Found Apple device %s; scheduling connect\n", dev->getAddress().toString().c_str());
-      if (gPendingDev) { delete gPendingDev; gPendingDev = nullptr; }
-      gPendingDev = new NimBLEAdvertisedDevice(*dev); // COPY
-      scheduleScanStop();
-      connectPending = true;
+
+    if (!hasOurService && !isAppleMfg) return;
+
+    if (!gLink.serverLinked && !hasOurService) {
+      // Without a current server link, chasing random Apple devices isn't useful.
+      return;
     }
+
+    if (recentlyFailed(dev) && !hasOurService) {
+      Serial.printf("[SCAN] Skipping Apple device %s (recent failure)\n",
+                    dev->getAddress().toString().c_str());
+      return;
+    }
+
+    Serial.printf("[SCAN] Found candidate %s (svc=%d apple=%d); scheduling connect\n",
+                  dev->getAddress().toString().c_str(), hasOurService?1:0, isAppleMfg?1:0);
+    if (gPendingDev) { delete gPendingDev; gPendingDev = nullptr; }
+    gPendingDev = new NimBLEAdvertisedDevice(*dev); // COPY
+    scheduleScanStop();
+    connectPending = true;
   }
   void onScanEnd(const NimBLEScanResults& /*results*/, int /*reason*/) override {
     // handled in loop
@@ -549,6 +662,10 @@ void loop(){
       if (ok) {
         Serial.println("[CLIENT] Connected; discovering AMS/ANCS...");
 
+        clearFailureFor(gPendingDev);
+        haveClientAddr = true;
+        gLastClientAddr = addrToString(gPendingDev);
+
         gLink.clientLinked = true;
         gLink.amsReady = gLink.ancsReady = false;
         chAmsCmd = chAmsUpd = chAmsAttr = nullptr;
@@ -598,10 +715,11 @@ void loop(){
         setStatus("iPhone linked", 1200);
         refreshDisplay();
 
-        // Keep scanning (address may rotate); harmless
-        scheduleScanStart(1000);
+        scanStartPending = false;
+        scanStopPending = false;
       } else {
         Serial.println("Back-connect failed; will scan");
+        rememberFailure(gPendingDev);
         scheduleScanStart(400);
       }
       delete gPendingDev; gPendingDev=nullptr;
