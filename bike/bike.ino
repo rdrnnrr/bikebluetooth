@@ -78,6 +78,7 @@ struct FailedPeer {
       : address(addr), retryUntil(until) {}
 };
 std::vector<FailedPeer> gFailedPeers;
+uint32_t gLastClientAttempt = 0;
 
 // AMS/ANCS handles
 NimBLERemoteCharacteristic* chAmsCmd   = nullptr;
@@ -179,6 +180,11 @@ void pruneFailedPeers(uint32_t now) {
       gFailedPeers.end());
 }
 
+void resetFailureMemory() {
+  gFailedPeers.clear();
+  gLastClientAttempt = 0;
+}
+
 bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
   if (!dev) return false;
   uint32_t now = millis();
@@ -186,6 +192,10 @@ bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
   String addr = String(dev->getAddress().toString().c_str());
   for (const auto& peer : gFailedPeers) {
     if (peer.address == addr) {
+      if (gLastClientAttempt && now - gLastClientAttempt > (CONNECT_BACKOFF_MS * 2)) {
+        Serial.println("[SCAN] Backoff expired; forcing retry");
+        return false;
+      }
       return true;
     }
   }
@@ -438,6 +448,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     gLink.serverLinked = true;
     gPeerAddr = connInfo.getAddress();
     havePeerAddr = true;
+    resetFailureMemory();
     Serial.printf("iPhone connected to our peripheral (handle=%u)\n", connInfo.getConnHandle());
     setStatus("Securing...", 1200);
     NimBLEDevice::startSecurity(connInfo.getConnHandle());
@@ -609,9 +620,12 @@ void loop(){
       if (gClient->isConnected()) gClient->disconnect();
 
       Serial.printf("Connecting back to iPhone at %s ...\n", gPendingDev->getAddress().toString().c_str());
+      gLastClientAttempt = millis();
       bool ok = gClient->connect(gPendingDev); // preserves addr TYPE (public/random)
       if (ok) {
         Serial.println("[CLIENT] Connected; discovering AMS/ANCS...");
+
+        resetFailureMemory();
 
         clearFailureFor(gPendingDev);
 
