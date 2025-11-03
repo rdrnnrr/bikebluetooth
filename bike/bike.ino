@@ -17,9 +17,9 @@
 #include <string>
 
 // =================== Pins & Display ===================
-#define JOY_X_PIN   34
+#define JOY_X_PIN   32
 #define JOY_Y_PIN   35
-#define JOY_SW_PIN  32
+#define JOY_SW_PIN  33
 
 #define OLED_ADDR   0x3C
 #define TOP_SDA     21
@@ -298,7 +298,7 @@ void updateSongMetrics() {
 
 // =================== AMS helpers ===================
 enum AmsRemoteCommand : uint8_t {
-  AMS_CMD_PLAY=0, AMS_CMD_PAUSE=1, AMS_CMD_TOGGLE=2, AMS_CMD_NEXT=3, AMS_CMD_PREV=4, AMS_CMD_VOL_UP=5, AMS_CMD_VOL_DOWN=6
+  AMS_CMD_PLAY=0, AMS_CMD_PAUSE=1, AMS_CMD_TOGGLE=2, AMS_CMD_NEXT=3, AMS_CMD_PREV=4, AMS_CMD_VOL_DOWN=5, AMS_CMD_VOL_UP=6
 };
 enum AmsEntityId : uint8_t { AMS_ENTITY_PLAYER=0, AMS_ENTITY_QUEUE=1, AMS_ENTITY_TRACK=2 };
 enum AmsTrackAttributeId : uint8_t { AMS_TRACK_ARTIST=0, AMS_TRACK_ALBUM=1, AMS_TRACK_TITLE=2 };
@@ -406,8 +406,57 @@ void scheduleScanStop() {
 class ClientCallbacks : public NimBLEClientCallbacks {
   void onConnect(NimBLEClient* pClient) override {
     gLink.clientLinked = true;
-    Serial.println("[CLIENT] Connected");
+    Serial.println("[CLIENT] Connected; discovering AMS/ANCS...");
+
+    gLink.amsReady = gLink.ancsReady = false;
+    chAmsCmd = chAmsUpd = chAmsAttr = nullptr;
+    chAncsCtrl = chAncsData = chAncsSrc = nullptr;
+
+    // AMS
+    if (auto svc = pClient->getService(UUID_AMS_SVC)) {
+      chAmsCmd  = svc->getCharacteristic(UUID_AMS_REMOTE_COMMAND);
+      chAmsUpd  = svc->getCharacteristic(UUID_AMS_ENTITY_UPDATE);
+      chAmsAttr = svc->getCharacteristic(UUID_AMS_ENTITY_ATTRIBUTE);
+      if (chAmsUpd && chAmsUpd->canNotify()) {
+        chAmsUpd->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+          if (len < 3) return;
+          uint8_t entity = data[0], attr=data[1];
+          String value = (len>2)? String((const char*)&data[2], len-2):String("");
+          value = cleanText(value);
+          if (entity==AMS_ENTITY_TRACK) {
+            if (attr==AMS_TRACK_ARTIST) { if (nowArtist!=value){ nowArtist=value; refreshDisplay(); } }
+            else if (attr==AMS_TRACK_ALBUM) { if (nowAlbum!=value){ nowAlbum=value; refreshDisplay(); } }
+            else if (attr==AMS_TRACK_TITLE) { if (nowTitle!=value){ nowTitle=value; updateSongMetrics(); refreshDisplay(); } }
+          }
+        });
+      }
+      if (chAmsAttr) amsSubscribeTrack();
+      gLink.amsReady = (chAmsCmd != nullptr);
+    }
+
+    // ANCS
+    if (auto svcN = pClient->getService(UUID_ANCS_SVC)) {
+      chAncsSrc  = svcN->getCharacteristic(UUID_ANCS_NOTIFICATION_SOURCE);
+      chAncsCtrl = svcN->getCharacteristic(UUID_ANCS_CONTROL_POINT);
+      chAncsData = svcN->getCharacteristic(UUID_ANCS_DATA_SOURCE);
+      if (chAncsSrc && chAncsSrc->canNotify()) {
+        chAncsSrc->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+          ancsHandleNotificationSource(data, len);
+        });
+      }
+      if (chAncsData && chAncsData->canNotify()) {
+        chAncsData->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+          ancsHandleData(data, len);
+        });
+      }
+      gLink.ancsReady = (chAncsCtrl && chAncsData);
+    }
+
+    Serial.printf("[CLIENT] Ready AMS:%d ANCS:%d\n", gLink.amsReady, gLink.ancsReady);
+    setStatus("iPhone linked", 1200);
+    refreshDisplay();
   }
+
   void onDisconnect(NimBLEClient* pClient, int reason) override {
     gLink.clientLinked = false;
     gLink.amsReady = false;
@@ -437,7 +486,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     Serial.println("Link encrypted. Scanning to back-connect...");
     clearBackoff();
     // Use scan (connectable + Apple mfg) to get a proper RPA + type
-    scheduleScanStart(200);
+    scheduleScanStart(2000);
   }
 };
 
@@ -535,11 +584,58 @@ void setup(){
   gServer = NimBLEDevice::createServer();
   gServer->setCallbacks(new ServerCallbacks());
 
-  // Advertise
+  // Create a dummy service to help with discovery on iPhone
+  NimBLEService* pDummyService = gServer->createService("180A"); // Device Information
+  pDummyService->createCharacteristic("2A29", NIMBLE_PROPERTY::READ)
+               ->setValue("BikeRemote");
+  pDummyService->start();
+
+  // NimBLEService* pHidService = gServer->createService("1812"); // HID
+  
+  // // HID Information
+  // uint8_t hidInfo[] = {0x11, 0x01, 0x00, 0x01}; // HID v1.11, country code 0, flags: normally connectable
+  // pHidService->createCharacteristic("2A4D", NIMBLE_PROPERTY::READ)->setValue(hidInfo, sizeof(hidInfo));
+
+  // // HID Control Point
+  // pHidService->createCharacteristic("2A4C", NIMBLE_PROPERTY::WRITE_NR);
+
+  // // Report Map
+  // const uint8_t reportMap[] = {
+  //     0x05, 0x0C, // Usage Page (Consumer)
+  //     0x09, 0x01, // Usage (Consumer Control)
+  //     0xA1, 0x01, // Collection (Application)
+  //     0x85, 0x01, // Report ID (1)
+  //     0x19, 0x00, // Usage Minimum (0)
+  //     0x2A, 0x9C, 0x02, // Usage Maximum (0x29C)
+  //     0x15, 0x00, // Logical Minimum (0)
+  //     0x26, 0x9C, 0x02, // Logical Maximum (0x29C)
+  //     0x95, 0x01, // Report Count (1)
+  //     0x75, 0x10, // Report Size (16)
+  //     0x81, 0x00, // Input (Data,Array,Abs)
+  //     0xC0        // End Collection
+  // };
+  // pHidService->createCharacteristic("2A4B", NIMBLE_PROPERTY::READ)->setValue(reportMap, sizeof(reportMap));
+
+  // // Input Report
+  // pHidService->createCharacteristic("2A4E", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  
+  // pHidService->start();
+
+  // Start advertising so iPhone can pair
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->setName("BikeRemote");
-  adv->addServiceUUID(UUID_ANCS_SVC);
-  adv->addServiceUUID(UUID_AMS_SVC);
+  
+  // Configure the main advertisement packet
+  NimBLEAdvertisementData advData;
+  advData.setFlags(0x06); // GENERAL_DISC_MODE | BR_EDR_UNSUPPORTED
+  advData.addServiceUUID(UUID_AMS_SVC);
+  adv->setAdvertisementData(advData);
+
+  // Configure the scan response packet
+  NimBLEAdvertisementData scanResponseData;
+  scanResponseData.setName("BikeRemote");
+  scanResponseData.addServiceUUID(UUID_ANCS_SVC);
+  adv->setScanResponseData(scanResponseData);
+  
   adv->start();
 
   // Scanner for client back-connect
@@ -554,7 +650,7 @@ void setup(){
   refreshDisplay();
 
   // Kick off scanning after boot
-  scheduleScanStart(400);
+  // scheduleScanStart(400);
 }
 
 // =================== Loop ===================
@@ -594,6 +690,7 @@ void loop(){
       Serial.printf("Connecting back to iPhone at %s ...\n", gPendingDev->getAddress().toString().c_str());
       bool ok = gClient->connect(gPendingDev); // preserves addr TYPE (public/random)
       if (ok) {
+        delay(500); // Allow time for service discovery
         Serial.println("[CLIENT] Connected; discovering AMS/ANCS...");
 
         clearBackoff();
@@ -685,13 +782,13 @@ void loop(){
   // Vol +/- (Y)
   if (!inDZ(emaY) && beyond(emaY)) {
     if (emaY < 0 && now - tUp > VOL_REPEAT_MS) {
-      amsSend(AMS_CMD_VOL_UP);
-      setStatus("Vol +", 600);
+      amsSend(AMS_CMD_VOL_DOWN);
+      setStatus("Vol -", 600);
       refreshDisplay();
       tUp = now;
     } else if (emaY > 0 && now - tDn > VOL_REPEAT_MS) {
-      amsSend(AMS_CMD_VOL_DOWN);
-      setStatus("Vol -", 600);
+      amsSend(AMS_CMD_VOL_UP);
+      setStatus("Vol +", 600);
       refreshDisplay();
       tDn = now;
     }
@@ -699,16 +796,16 @@ void loop(){
 
   // Next/Prev (X)
   if (!inDZ(emaX) && beyond(emaX)) {
-    if (emaX < 0 && now - tR > ACTION_COOLDOWN) {
-      amsSend(AMS_CMD_NEXT);
-      setStatus("Next >", 800);
-      refreshDisplay();
-      tR = now;
-    } else if (emaX > 0 && now - tL > ACTION_COOLDOWN) {
+    if (emaX < 0 && now - tL > ACTION_COOLDOWN) {
       amsSend(AMS_CMD_PREV);
       setStatus("< Prev", 800);
       refreshDisplay();
       tL = now;
+    } else if (emaX > 0 && now - tR > ACTION_COOLDOWN) {
+      amsSend(AMS_CMD_NEXT);
+      setStatus("Next >", 800);
+      refreshDisplay();
+      tR = now;
     }
   }
 
