@@ -438,6 +438,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     gLink.serverLinked = true;
     gPeerAddr = connInfo.getAddress();
     havePeerAddr = true;
+    gFailedPeers.clear();
     Serial.printf("iPhone connected to our peripheral (handle=%u)\n", connInfo.getConnHandle());
     setStatus("Securing...", 1200);
     NimBLEDevice::startSecurity(connInfo.getConnHandle());
@@ -451,6 +452,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onAuthenticationComplete(NimBLEConnInfo& /*connInfo*/) override {
     Serial.println("Link encrypted. Scanning to back-connect...");
+    gFailedPeers.clear();
     // Use scan (connectable + Apple mfg) to get a proper RPA + type
     scheduleScanStart(200);
   }
@@ -477,7 +479,7 @@ class ScanCallbacks : public NimBLEScanCallbacks {
     }
     // Else Apple device (likely your iPhone)
     if (dev->haveManufacturerData() && isApple(dev->getManufacturerData())) {
-      if (recentlyFailed(dev)) {
+      if (!gLink.serverLinked && recentlyFailed(dev)) {
         Serial.printf("[SCAN] Skipping Apple device %s (recent failure)\n",
                       dev->getAddress().toString().c_str());
         return;
