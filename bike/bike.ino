@@ -1,11 +1,12 @@
-/******************************************************
+/*
  * Bike Remote — ESP32 (Arduino core 3.3.x, NimBLE-Arduino 2.3+)
- * - Two SSD1306 128x32 displays on separate I2C buses (both 0x3C)
- * - Joystick on 34/35 + button on 32
- * - BLE multi-role: act as Peripheral for pairing, then scan & connect back as Client
- * - Connects to iPhone using a COPY of the advertised device (preserves addr type)
- * - Controls: Press=Play/Pause, X=Prev/Next, Y=Vol-/Vol+
- ******************************************************/
+ * Two SSD1306 128x32 displays (both 0x3C) on separate I2C buses
+ * Joystick on 34/35 + button on 32
+ * BLE multi-role: act as Peripheral for pairing, then scan & connect back as Client
+ * Connects to iPhone using a COPY of the advertised device (preserves addr type)
+ * Controls: Press=Play/Pause, X=Prev/Next, Y=Vol-/Vol+
+ */
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -13,6 +14,7 @@
 #include <NimBLEDevice.h>
 #include <math.h>
 #include <cstring>
+#include <string>
 
 // =================== Pins & Display ===================
 #define JOY_X_PIN   34
@@ -101,6 +103,9 @@ int midX = 2048, midY = 2048;
 uint32_t tUp=0, tDn=0, tL=0, tR=0, tBtn=0;
 bool btnWasDown = false; 
 uint32_t btnDownAt = 0;
+
+// One diag ticker (avoid redeclaration)
+uint32_t gDiagTick = 0;
 
 // =================== Helpers ===================
 static inline bool inDZ(float v){ return fabsf(v) < DEADZONE; }
@@ -507,7 +512,6 @@ void setup(){
 
 // =================== Loop ===================
 void loop(){
-  static uint32_t lastDiag=0;
   uint32_t now = millis();
 
   // Expire overlays
@@ -667,10 +671,9 @@ void loop(){
     }
   }
 
-  // Periodic diagnostics
-  static uint32_t lastDiag=0;
-  if (now - lastDiag > 2000) {
-    lastDiag = now;
+  // Periodic diagnostics (single ticker)
+  if (now - gDiagTick > 2000) {
+    gDiagTick = now;
     Serial.printf("[DIAG] srv=%d cli=%d ams=%d ancs=%d scan=%d\n",
       gLink.serverLinked?1:0, gLink.clientLinked?1:0,
       gLink.amsReady?1:0, gLink.ancsReady?1:0,
