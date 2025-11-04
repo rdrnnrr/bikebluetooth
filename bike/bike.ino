@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // =================== Pins & Display ===================
 #define JOY_X_PIN   34
@@ -78,6 +80,27 @@ struct FailedPeer {
       : address(addr), retryUntil(until) {}
 };
 std::vector<FailedPeer> gFailedPeers;
+SemaphoreHandle_t gFailedPeersMutex = nullptr;
+
+class FailedPeersGuard {
+ public:
+  FailedPeersGuard() {
+    if (gFailedPeersMutex) {
+      locked_ = (xSemaphoreTake(gFailedPeersMutex, portMAX_DELAY) == pdTRUE);
+    } else {
+      locked_ = true;
+    }
+  }
+  ~FailedPeersGuard() {
+    if (gFailedPeersMutex && locked_) {
+      xSemaphoreGive(gFailedPeersMutex);
+    }
+  }
+  bool owns_lock() const { return locked_; }
+
+ private:
+  bool locked_ = false;
+};
 
 // AMS/ANCS handles
 NimBLERemoteCharacteristic* chAmsCmd   = nullptr;
@@ -171,7 +194,7 @@ void showNotif(const String& title, const String& body, const String& app, uint3
 }
 void clearNotif() { notifActive=false; notifTitle=""; notifMsg=""; notifApp=""; notifUntil=0; }
 
-void pruneFailedPeers(uint32_t now) {
+void pruneFailedPeersLocked(uint32_t now) {
   if (gFailedPeers.empty()) return;
   gFailedPeers.erase(
       std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
@@ -182,7 +205,9 @@ void pruneFailedPeers(uint32_t now) {
 bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
   if (!dev) return false;
   uint32_t now = millis();
-  pruneFailedPeers(now);
+  FailedPeersGuard guard;
+  if (!guard.owns_lock()) return false;
+  pruneFailedPeersLocked(now);
   String addr = String(dev->getAddress().toString().c_str());
   for (const auto& peer : gFailedPeers) {
     if (peer.address == addr) {
@@ -195,7 +220,9 @@ bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
 void rememberFailure(const NimBLEAdvertisedDevice* dev) {
   if (!dev) return;
   uint32_t now = millis();
-  pruneFailedPeers(now);
+  FailedPeersGuard guard;
+  if (!guard.owns_lock()) return;
+  pruneFailedPeersLocked(now);
   String addr = String(dev->getAddress().toString().c_str());
   bool updated = false;
   for (auto& peer : gFailedPeers) {
@@ -211,7 +238,10 @@ void rememberFailure(const NimBLEAdvertisedDevice* dev) {
 }
 
 void clearFailureFor(const NimBLEAdvertisedDevice* dev) {
-  if (!dev || gFailedPeers.empty()) return;
+  if (!dev) return;
+  FailedPeersGuard guard;
+  if (!guard.owns_lock()) return;
+  if (gFailedPeers.empty()) return;
   String addr = String(dev->getAddress().toString().c_str());
   gFailedPeers.erase(
       std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
@@ -441,7 +471,12 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     gLink.serverLinked = true;
     gPeerAddr = connInfo.getAddress();
     havePeerAddr = true;
-    gFailedPeers.clear();
+    {
+      FailedPeersGuard guard;
+      if (guard.owns_lock()) {
+        gFailedPeers.clear();
+      }
+    }
     Serial.printf("iPhone connected to our peripheral (handle=%u)\n", connInfo.getConnHandle());
     setStatus("Securing...", 1200);
     NimBLEDevice::startSecurity(connInfo.getConnHandle());
@@ -455,7 +490,12 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onAuthenticationComplete(NimBLEConnInfo& /*connInfo*/) override {
     Serial.println("Link encrypted. Scanning to back-connect...");
-    gFailedPeers.clear();
+    {
+      FailedPeersGuard guard;
+      if (guard.owns_lock()) {
+        gFailedPeers.clear();
+      }
+    }
     // Use scan (connectable + Apple mfg) to get a proper RPA + type
     scheduleScanStart(200);
   }
@@ -516,6 +556,11 @@ void smoothRead() {
 // =================== Setup ===================
 void setup(){
   Serial.begin(115200);
+
+  gFailedPeersMutex = xSemaphoreCreateMutex();
+  if (!gFailedPeersMutex) {
+    Serial.println("Failed to create gFailedPeersMutex");
+  }
 
   pinMode(JOY_SW_PIN, INPUT_PULLUP);
   analogReadResolution(12);
