@@ -1,754 +1,354 @@
 /*
- * Bike Remote — ESP32 (Arduino core 3.3.x, NimBLE-Arduino 2.3+)
- * Two SSD1306 128x32 displays (both 0x3C) on separate I2C buses
- * Joystick on 34/35 + button on 32
- * BLE multi-role: act as Peripheral for pairing, then scan & connect back as Client
- * Connects to iPhone using a COPY of the advertised device (preserves addr type)
- * Controls: Press=Play/Pause, X=Prev/Next, Y=Vol-/Vol+
+ * BikeHID — ESP32 + NimBLE-Arduino (Arduino-ESP32 3.3.x)
+ * Joystick HID media remote with auto-range calibration.
+ *
+ * Controls:
+ * - Button short: Play/Pause
+ * - Button long (~700ms): Voice (Siri)
+ * - X left/right: Prev / Next
+ * - Y up/down:    Vol- / Vol+
  */
 
 #include <Arduino.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <NimBLEDevice.h>
+#include <NimBLEHIDDevice.h>
 #include <math.h>
-#include <cstring>
-#include <string>
-#include <vector>
-#include <algorithm>
 
-// =================== Pins & Display ===================
-#define JOY_X_PIN   34
-#define JOY_Y_PIN   35
-#define JOY_SW_PIN  32
+// ---------------- Pins ----------------
+#define JOY_X_PIN 35
+#define JOY_Y_PIN 34
+#define JOY_SW_PIN 32   // active LOW (INPUT_PULLUP)
 
-#define OLED_ADDR   0x3C
-#define TOP_SDA     21
-#define TOP_SCL     22
-#define BOT_SDA     25
-#define BOT_SCL     26
+// ---------------- Options ----------------
+#define INVERT_X    1   // *** FIX: Changed to 1 based on log (Left movement = -1.00) ***
+#define INVERT_Y    0
+#define DEBUG_PRINT 0   // SET BACK TO 0 FOR NORMAL USE
 
-TwoWire WireTop = TwoWire(0);
-TwoWire WireBot = TwoWire(1);
+// Raw jitter control
+const float EMA_ALPHA        = 0.18f;
+const int   DEADZONE_RAW     = 350;
 
-Adafruit_SSD1306 oledTop(128, 32, &WireTop, -1);
-Adafruit_SSD1306 oledBot(128, 32, &WireBot, -1);
+// % thresholds relative to learned travel
+const float THRESH_PCT_X     = 0.30f;
+const float THRESH_PCT_Y     = 0.30f;
+const float RELEASE_PCT      = 0.18f;
 
-// =================== BLE UUIDs ===================
-// ANCS
-static const NimBLEUUID UUID_ANCS_SVC("7905F431-B5CE-4E99-A40F-4B1E122D00D0");
-static const NimBLEUUID UUID_ANCS_NOTIFICATION_SOURCE("9FBF120D-6301-42D9-8C58-25E699A21DBD");
-static const NimBLEUUID UUID_ANCS_CONTROL_POINT("69D1D8F3-45E1-49A8-9821-9BBDFDAAD9D9");
-static const NimBLEUUID UUID_ANCS_DATA_SOURCE("22EAC6E9-24D6-4BB5-BE44-B36ACE7C7BFB");
-// AMS
-static const NimBLEUUID UUID_AMS_SVC("89D3502B-0F36-433A-8EF4-C502AD55F8DC");
-static const NimBLEUUID UUID_AMS_REMOTE_COMMAND("9B3C81D8-57B1-4A8A-B8DF-0E56F7CA51C2");
-static const NimBLEUUID UUID_AMS_ENTITY_UPDATE("2F7CABCE-808D-411F-9A0C-BB92BA96C102");
-static const NimBLEUUID UUID_AMS_ENTITY_ATTRIBUTE("C6B2F38C-23AB-46D8-A6AB-A3A870B5A1D6");
+// Timing
+const uint16_t ARM_DWELL_MS       = 50;
+const uint16_t VOL_REPEAT_MS      = 150;
+const uint16_t ACTION_COOLDOWN_MS = 240;
 
-// =================== State ===================
-struct LinkState {
-  bool serverLinked = false;   // iPhone connected to our peripheral
-  bool clientLinked = false;   // we connected back to iPhone
-  bool amsReady     = false;
-  bool ancsReady    = false;
-} gLink;
+// Button filters
+const uint16_t BTN_DEBOUNCE_MS       = 25;
+const uint16_t BTN_MIN_LOW_MS        = 10;
+const uint8_t  BTN_SAMPLE_NS         = 6;
+const uint16_t BTN_SAMPLE_SPACING_MS = 1;
 
-NimBLEServer* gServer = nullptr;
-NimBLEClient* gClient = nullptr;
-NimBLEScan*   gScan   = nullptr;
+// Cross-input brakes
+const uint16_t MUTEX_XY_AFTER_BTN_MS  = 350;
+const uint16_t MUTEX_BTN_AFTER_XY_MS  = 300;
 
-NimBLEAddress gPeerAddr;      // learned from server-side connection
-bool          havePeerAddr = false;
+// Neutral requirement (light)
+const float    QUIET_PCT           = 0.15f;
+const uint16_t QUIET_BEFORE_ARM_MS = 20;
 
-// Safe scanner/connect scheduling
-bool     scanStartPending = false;
-uint32_t scanStartAtMs    = 0;
-bool     scanStopPending  = false;
+// Auto-center + auto-span
+const float TRIM_BAND_PCT = 0.05f;
+const float TRIM_ALPHA    = 0.002f;
+const float PEAK_DECAY    = 0.995f;
+const float PEAK_FLOOR    = 220.0f;
 
-bool     connectPending   = false;          // request a client connect in loop
-NimBLEAdvertisedDevice* gPendingDev = nullptr; // heap copy of advertised device
+// Long-press -> Siri
+const uint32_t SIRI_HOLD_MS = 700;
 
-const uint32_t CONNECT_BACKOFF_MS = 8000;   // wait before retrying a failed peer
-struct FailedPeer {
-  String address;
-  uint32_t retryUntil;
-  FailedPeer(const String& addr, uint32_t until)
-      : address(addr), retryUntil(until) {}
-};
-std::vector<FailedPeer> gFailedPeers;
+// HID usages (Consumer Page 0x0C)
+#define CC_PLAY_PAUSE  0x00CD
+#define CC_SCAN_NEXT   0x00B5
+#define CC_SCAN_PREV   0x00B6
+#define CC_VOL_UP      0x00E9
+#define CC_VOL_DOWN    0x00EA
+#define CC_VOICE_CMD   0x029C
 
-// AMS/ANCS handles
-NimBLERemoteCharacteristic* chAmsCmd   = nullptr;
-NimBLERemoteCharacteristic* chAmsUpd   = nullptr;
-NimBLERemoteCharacteristic* chAmsAttr  = nullptr;
-NimBLERemoteCharacteristic* chAncsCtrl = nullptr;
-NimBLERemoteCharacteristic* chAncsData = nullptr;
-NimBLERemoteCharacteristic* chAncsSrc  = nullptr;
+// ---------------- State ----------------
+float emaX=0, emaY=0, nx=0, ny=0;
+int midX=2048, midY=2048, lastRx=2048, lastRy=2048;
+float peakX=400, peakY=400;
 
-// =================== UI State ===================
-String nowArtist, nowAlbum, nowTitle;
-String statusMsg;
-bool   statusActive = false;
-uint32_t statusUntil = 0;
+uint32_t tUp=0, tDn=0, tL=0, tR=0;
+uint32_t lastBtnActionAt=0, lastXYActionAt=0;
 
-String notifApp, notifTitle, notifMsg;
-bool   notifActive = false;
-uint32_t notifUntil = 0;
+bool btnWasDown=false, btnEligible=false; // btnEligible will be treated as always true
+uint32_t btnLowStart=0, btnDownAt=0;
 
-uint32_t lastScroll = 0;
-int scrollOffset = 0;
-int songPixelWidth = 0;
+bool volArmed=false; uint32_t volArmStart=0; bool yUpHold=false, yDnHold=false;
+bool xArmed=false;  uint32_t xArmStart=0;
 
-// =================== Joystick control ===================
-const float EMA_ALPHA = 0.18f;
-const int DEADZONE = 350;
-const int TRIGGER_THRESH = 1200;
-const uint16_t VOL_REPEAT_MS = 120;
-const uint16_t ACTION_COOLDOWN = 220;
-const uint32_t BOND_CLEAR_HOLD_MS = 3000;
+uint32_t quietStart=0;
 
-float emaX = 0, emaY = 0;
-int midX = 2048, midY = 2048;
-uint32_t tUp=0, tDn=0, tL=0, tR=0, tBtn=0;
-bool btnWasDown = false; 
-uint32_t btnDownAt = 0;
+NimBLEHIDDevice* gHid=nullptr;
+NimBLECharacteristic* gInputReport=nullptr;
+NimBLECharacteristic* gBattChar=nullptr;
 
-// One diag ticker (avoid redeclaration)
-uint32_t gDiagTick = 0;
+// ---------------- Helpers ----------------
+static inline bool inRawDZ(int v){ return abs(v) < DEADZONE_RAW; }
+static inline float clamp1(float v){ return v<-1? -1 : (v>1? 1 : v); }
 
-// =================== Helpers ===================
-static inline bool inDZ(float v){ return fabsf(v) < DEADZONE; }
-static inline bool beyond(float v){ return fabsf(v) > TRIGGER_THRESH; }
-
-String cleanText(const String& in) {
-  String out; out.reserve(in.length());
-  for (uint16_t i=0;i<in.length();) {
-    uint8_t b = (uint8_t)in[i];
-    if (b=='\r' || b=='\n') { i++; continue; }
-    if (b=='\t') { out+=' '; i++; continue; }
-    if (b>=32 && b<=126) { out+=(char)b; i++; continue; }
-    if (b>=0x80) {
-      out+='?'; i++;
-      while (i<in.length()) {
-        uint8_t n = (uint8_t)in[i];
-        if ((n&0xC0)==0x80) i++; else break;
-      }
-      continue;
-    }
-    i++;
-  }
-  out.trim();
-  return out;
+void calibrateCenter(){
+  long sx=0, sy=0; for(int i=0;i<24;i++){ sx+=analogRead(JOY_X_PIN); sy+=analogRead(JOY_Y_PIN); delay(4); }
+  midX=sx/24; midY=sy/24; emaX=emaY=0;
 }
 
-String mapAppId(const String& appId) {
-  if (appId.equalsIgnoreCase("com.apple.mobilephone")) return "Call";
-  if (appId.equalsIgnoreCase("net.whatsapp.WhatsApp")) return "WhatsApp";
-  if (appId.equalsIgnoreCase("com.google.ios.youtubemusic")) return "YT Music";
-  if (appId.equalsIgnoreCase("com.apple.MobileSMS")) return "Messages";
-  if (appId.equalsIgnoreCase("com.apple.facetime")) return "FaceTime";
-  if (appId.equalsIgnoreCase("com.apple.Music")) return "Apple Music";
-  if (!appId.length()) return "Notification";
-  return appId;
-}
+void smoothAndNormalize(){
+  int rx=analogRead(JOY_X_PIN), ry=analogRead(JOY_Y_PIN);
+  lastRx=rx; lastRy=ry;
 
-void setStatus(const String& msg, uint32_t ms=1500) {
-  statusMsg = cleanText(msg);
-  statusActive = true;
-  statusUntil = ms ? millis()+ms : 0;
-}
+  int dx=rx-midX, dy=ry-midY;
+  if(inRawDZ(dx)) dx=0;
+  if(inRawDZ(dy)) dy=0;
 
-void clearStatus() { statusActive=false; statusMsg=""; statusUntil=0; }
+  emaX=(1-EMA_ALPHA)*emaX + EMA_ALPHA*(float)dx;
+  emaY=(1-EMA_ALPHA)*emaY + EMA_ALPHA*(float)dy;
 
-void showNotif(const String& title, const String& body, const String& app, uint32_t ms=8000) {
-  notifTitle = cleanText(title);
-  notifMsg   = cleanText(body);
-  notifApp   = cleanText(mapAppId(app));
-  notifActive=true;
-  notifUntil = ms ? millis()+ms : 0;
-}
-void clearNotif() { notifActive=false; notifTitle=""; notifMsg=""; notifApp=""; notifUntil=0; }
+  // Learn span via decaying peak
+  float ax=fabsf(emaX), ay=fabsf(emaY);
+  peakX = fmaxf(peakX*PEAK_DECAY, ax);
+  peakY = fmaxf(peakY*PEAK_DECAY, ay);
+  if (peakX < PEAK_FLOOR) peakX = PEAK_FLOOR;
+  if (peakY < PEAK_FLOOR) peakY = PEAK_FLOOR;
 
-void pruneFailedPeers(uint32_t now) {
-  if (gFailedPeers.empty()) return;
-  gFailedPeers.erase(
-      std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
-                     [now](const FailedPeer& peer) { return now >= peer.retryUntil; }),
-      gFailedPeers.end());
-}
+  // Normalize to learned span
+  nx = clamp1(emaX / peakX);
+  ny = clamp1(emaY / peakY);
+#if INVERT_X
+  nx = -nx; // *** Now inverted for correct direction ***
+#endif
+#if INVERT_Y
+  ny = -ny;
+#endif
 
-bool recentlyFailed(const NimBLEAdvertisedDevice* dev) {
-  if (!dev) return false;
-  uint32_t now = millis();
-  pruneFailedPeers(now);
-  String addr = String(dev->getAddress().toString().c_str());
-  for (const auto& peer : gFailedPeers) {
-    if (peer.address == addr) {
-      return true;
-    }
-  }
-  return false;
-}
+  // Quiet gate timing
+  if (fabsf(nx)<=QUIET_PCT && fabsf(ny)<=QUIET_PCT) {
+    if (!quietStart) quietStart=millis();
+  } else quietStart=0;
 
-void rememberFailure(const NimBLEAdvertisedDevice* dev) {
-  if (!dev) return;
-  uint32_t now = millis();
-  pruneFailedPeers(now);
-  String addr = String(dev->getAddress().toString().c_str());
-  bool updated = false;
-  for (auto& peer : gFailedPeers) {
-    if (peer.address == addr) {
-      peer.retryUntil = now + CONNECT_BACKOFF_MS;
-      updated = true;
-      break;
-    }
-  }
-  if (!updated) {
-    gFailedPeers.emplace_back(addr, now + CONNECT_BACKOFF_MS);
+  // Slow auto-center when calm & idle
+  if (quietStart && (millis()-quietStart)>250 &&
+      fabsf(nx)<=TRIM_BAND_PCT && fabsf(ny)<=TRIM_BAND_PCT &&
+      !volArmed && !xArmed &&
+      (millis()-lastBtnActionAt>400) && (millis()-lastXYActionAt>400)) {
+    midX = (int)((1.0f-TRIM_ALPHA)*midX + TRIM_ALPHA*lastRx);
+    midY = (int)((1.0f-TRIM_ALPHA)*midY + TRIM_ALPHA*lastRy);
   }
 }
 
-void clearFailureFor(const NimBLEAdvertisedDevice* dev) {
-  if (!dev || gFailedPeers.empty()) return;
-  String addr = String(dev->getAddress().toString().c_str());
-  gFailedPeers.erase(
-      std::remove_if(gFailedPeers.begin(), gFailedPeers.end(),
-                     [&addr](const FailedPeer& peer) { return peer.address == addr; }),
-      gFailedPeers.end());
-}
-
-// =================== Display ===================
-void drawTopNowPlaying() {
-  oledTop.clearDisplay();
-  oledTop.setTextColor(SSD1306_WHITE);
-  oledTop.setTextSize(1);
-  oledTop.setCursor(0,0);
-  oledTop.println(nowArtist.length()?nowArtist:"Unknown Artist");
-  oledTop.setCursor(0,16);
-  if (!gLink.clientLinked) oledTop.println("Waiting link...");
-  else oledTop.println(nowAlbum.length()?nowAlbum:"Unknown Album");
-  oledTop.display();
-}
-
-void drawBottomScroll() {
-  oledBot.clearDisplay();
-  oledBot.setTextColor(SSD1306_WHITE);
-  oledBot.setTextSize(2);
-
-  int16_t x1,y1; uint16_t w,h;
-  oledBot.getTextBounds(nowTitle.c_str(), 0, 0, &x1, &y1, &w, &h);
-
-  if ((int)w > 128) {
-    oledBot.setCursor(-scrollOffset, 8);
-    oledBot.print(nowTitle);
-    if (millis()-lastScroll > 150) {
-      scrollOffset++;
-      if (scrollOffset > (int)w + 24) scrollOffset = 0;
-      lastScroll = millis();
-    }
-  } else {
-    int x = (128 - (int)w)/2; if (x < 0) x = 0;
-    oledBot.setCursor(x, 8);
-    oledBot.print(nowTitle.length()?nowTitle:"Ready");
+// Majority-sampled, debounced, min-low button
+bool sampleButtonRawLow(){
+  uint8_t lows=0;
+  for(uint8_t i=0;i<BTN_SAMPLE_NS;i++){
+    lows += (digitalRead(JOY_SW_PIN)==LOW);
+    delay(BTN_SAMPLE_SPACING_MS);
   }
-  oledBot.display();
+  return lows > (BTN_SAMPLE_NS/2);
+}
+bool readButtonStable(uint32_t now){
+  static bool stableLow=false, lastStableLow=false; static uint32_t lastEdgeAt=0;
+  bool lowNow = sampleButtonRawLow();
+  if (lowNow != stableLow){ stableLow = lowNow; lastEdgeAt = now; }
+  if (now - lastEdgeAt < BTN_DEBOUNCE_MS) return lastStableLow;
+
+  if (stableLow){
+    if (!btnLowStart) btnLowStart = now;
+    if (now - btnLowStart >= BTN_MIN_LOW_MS) { lastStableLow=true; return true; }
+    return false;
+  } else { btnLowStart=0; lastStableLow=false; return false; }
 }
 
-void drawBottomStatic(const char* txt) {
-  oledBot.clearDisplay();
-  oledBot.setTextColor(SSD1306_WHITE);
-  oledBot.setTextSize(2);
-  int16_t x1,y1; uint16_t w,h;
-  oledBot.getTextBounds(txt, 0, 0, &x1, &y1, &w, &h);
-  int x = (128 - (int)w)/2, y = (32 - (int)h)/2;
-  if (x<0) x=0; if (y<0) y=0;
-  oledBot.setCursor(x,y);
-  oledBot.print(txt);
-  oledBot.display();
+void sendConsumer(uint16_t usage){
+  if(!gInputReport) return;
+  uint8_t m[2]={(uint8_t)(usage&0xFF),(uint8_t)((usage>>8)&0xFF)};
+  gInputReport->setValue(m,2); gInputReport->notify();
+  // We need a slight delay to ensure the OS registers the key-down before key-up
+  delay(10);
+  m[0]=0; m[1]=0; gInputReport->setValue(m,2); gInputReport->notify();
 }
 
-void drawNotif() {
-  oledTop.clearDisplay();
-  oledTop.setTextColor(SSD1306_WHITE);
-  oledTop.setTextSize(1);
-  oledTop.setCursor(0,0);
-  oledTop.println(notifApp.length()?notifApp:"Notification");
-  oledTop.setCursor(0,16);
-  String t = notifTitle; if (t.length()>20) t = t.substring(0,20);
-  oledTop.print(t);
-  oledTop.display();
-
-  oledBot.clearDisplay();
-  oledBot.setTextColor(SSD1306_WHITE);
-  oledBot.setTextSize(1);
-  oledBot.setCursor(0,0);
-  String l1, l2;
-  if (notifMsg.length() <= 21) { l1=notifMsg; l2=""; }
-  else {
-    l1 = notifMsg.substring(0,21);
-    uint16_t endIndex = notifMsg.length()>42 ? 42 : notifMsg.length();
-    l2 = notifMsg.substring(21, endIndex);
+// ---------------- GAP callbacks ----------------
+class ServerCallbacks: public NimBLEServerCallbacks{
+  void onConnect(NimBLEServer*, NimBLEConnInfo& info) override {
+    Serial.printf("central connected, handle=%u\n", info.getConnHandle());
+    NimBLEDevice::startSecurity(info.getConnHandle());
   }
-  oledBot.println(l1);
-  oledBot.setCursor(0,16);
-  oledBot.println(l2);
-  oledBot.display();
-}
-
-void refreshDisplay() {
-  if (notifActive) { drawNotif(); return; }
-  if (statusActive) { drawTopNowPlaying(); drawBottomStatic(statusMsg.c_str()); return; }
-  drawTopNowPlaying();
-  drawBottomScroll();
-}
-
-void updateSongMetrics() {
-  oledBot.setTextSize(2);
-  int16_t x1,y1; uint16_t w,h;
-  oledBot.getTextBounds(nowTitle.c_str(), 0, 0, &x1, &y1, &w, &h);
-  songPixelWidth = (int)w;
-  scrollOffset = 0;
-  lastScroll = millis();
-}
-
-// =================== AMS helpers ===================
-enum AmsRemoteCommand : uint8_t {
-  AMS_CMD_PLAY=0, AMS_CMD_PAUSE=1, AMS_CMD_TOGGLE=2, AMS_CMD_NEXT=3, AMS_CMD_PREV=4, AMS_CMD_VOL_UP=5, AMS_CMD_VOL_DOWN=6
-};
-enum AmsEntityId : uint8_t { AMS_ENTITY_PLAYER=0, AMS_ENTITY_QUEUE=1, AMS_ENTITY_TRACK=2 };
-enum AmsTrackAttributeId : uint8_t { AMS_TRACK_ARTIST=0, AMS_TRACK_ALBUM=1, AMS_TRACK_TITLE=2 };
-
-void amsSend(uint8_t cmd) {
-  if (!gLink.amsReady || !chAmsCmd) return;
-  Serial.printf("[AMS] cmd=%u\n", cmd);
-  chAmsCmd->writeValue(&cmd, 1, true);
-}
-void amsRequestAttr(uint8_t entity, uint8_t attr, uint16_t maxLen) {
-  if (!chAmsAttr) return;
-  uint8_t p[4];
-  p[0]=entity; p[1]=attr; p[2]=(uint8_t)(maxLen & 0xFF); p[3]=(uint8_t)((maxLen>>8)&0xFF);
-  chAmsAttr->writeValue(p, sizeof(p), true);
-}
-void amsSubscribeTrack() {
-  amsRequestAttr(AMS_ENTITY_TRACK, AMS_TRACK_TITLE, 80);
-  amsRequestAttr(AMS_ENTITY_TRACK, AMS_TRACK_ARTIST, 80);
-  amsRequestAttr(AMS_ENTITY_TRACK, AMS_TRACK_ALBUM, 80);
-}
-
-// =================== ANCS helpers ===================
-enum AncsEventId : uint8_t { ANCS_EVENT_ADDED=0, ANCS_EVENT_MODIFIED=1, ANCS_EVENT_REMOVED=2 };
-enum AncsCategoryId : uint8_t { ANCS_CATEGORY_OTHER=0, ANCS_CATEGORY_INCOMING_CALL=1 };
-
-uint32_t currentNotifUid = 0;
-uint8_t  currentNotifCategory = 0;
-
-void ancsHandleNotificationSource(uint8_t* data, size_t len) {
-  if (len < 8) return;
-  uint8_t eventId = data[0];
-  uint8_t categoryId = data[2];
-  currentNotifCategory = categoryId;
-  uint32_t uid = (uint32_t)data[4] | ((uint32_t)data[5]<<8) | ((uint32_t)data[6]<<16) | ((uint32_t)data[7]<<24);
-
-  if (eventId==ANCS_EVENT_ADDED || eventId==ANCS_EVENT_MODIFIED) {
-    currentNotifUid = uid;
-    if (chAncsCtrl) {
-      uint8_t p[32]; size_t idx=0;
-      p[idx++]=0x00; // Get Notification Attributes
-      p[idx++]=(uint8_t)(uid & 0xFF);
-      p[idx++]=(uint8_t)((uid>>8)&0xFF);
-      p[idx++]=(uint8_t)((uid>>16)&0xFF);
-      p[idx++]=(uint8_t)((uid>>24)&0xFF);
-      p[idx++]=0x00; // App Identifier
-      p[idx++]=0x01; p[idx++]=0x40; p[idx++]=0x00; // Title 64
-      p[idx++]=0x02; p[idx++]=0x40; p[idx++]=0x00; // Subtitle 64
-      p[idx++]=0x03; p[idx++]=0x80; p[idx++]=0x00; // Message 128
-      p[idx++]=0x04; p[idx++]=0x00; p[idx++]=0x00; // Message Size
-      chAncsCtrl->writeValue(p, idx, true);
-    }
-    amsRequestAttr(AMS_ENTITY_TRACK, AMS_TRACK_TITLE, 80);
-  } else if (eventId==ANCS_EVENT_REMOVED) {
-    if (uid==currentNotifUid) clearNotif();
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int reason) override {
+    Serial.printf("central disconnected, reason=%d\n", reason);
+    NimBLEDevice::getAdvertising()->start();
   }
-}
-
-void ancsHandleData(const uint8_t* data, size_t len) {
-  if (len < 5) return;
-  size_t i=0;
-  uint32_t uid = (uint32_t)data[i] | ((uint32_t)data[i+1]<<8) | ((uint32_t)data[i+2]<<16) | ((uint32_t)data[i+3]<<24);
-  i+=4;
-  if (uid != currentNotifUid) return;
-
-  String appId, title, subtitle, message;
-
-  while (i+3 <= len) {
-    uint8_t attrId = data[i++];
-    uint16_t attrLen = (uint16_t)data[i] | ((uint16_t)data[i+1]<<8);
-    i+=2;
-    if (i+attrLen > len) break;
-    String v = attrLen ? String((const char*)&data[i], attrLen) : String("");
-    i += attrLen;
-
-    v = cleanText(v);
-    switch (attrId) {
-      case 0x00: appId=v; break;
-      case 0x01: title=v; break;
-      case 0x02: subtitle=v; break;
-      case 0x03: message=v; break;
-      default: break;
-    }
-  }
-
-  String displayTitle = title.length()?title:subtitle;
-  if (!displayTitle.length()) {
-    displayTitle = (currentNotifCategory==ANCS_CATEGORY_INCOMING_CALL) ? "Incoming Call" : "Notification";
-  }
-  if (currentNotifCategory==ANCS_CATEGORY_INCOMING_CALL) showNotif(displayTitle, message, appId, 0);
-  else showNotif(displayTitle, message, appId, 8000);
-}
-
-// =================== Scanner scheduling ===================
-void scheduleScanStart(uint32_t delayMs = 0) {
-  scanStopPending = false;
-  scanStartPending = true;
-  scanStartAtMs = millis() + delayMs;
-}
-void scheduleScanStop() {
-  scanStartPending = false;
-  scanStopPending = true;
-}
-
-// =================== BLE Callbacks ===================
-class ClientCallbacks : public NimBLEClientCallbacks {
-  void onConnect(NimBLEClient* pClient) override {
-    gLink.clientLinked = true;
-    Serial.println("[CLIENT] Connected");
-  }
-  void onDisconnect(NimBLEClient* pClient, int reason) override {
-    gLink.clientLinked = false;
-    gLink.amsReady = false;
-    gLink.ancsReady = false;
-    Serial.printf("[CLIENT] Disconnected, reason=%d\n", reason);
-  }
+  void onAuthenticationComplete(NimBLEConnInfo&) override { Serial.println("bonded/encrypted"); }
 };
 
-class ServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
-    gLink.serverLinked = true;
-    gPeerAddr = connInfo.getAddress();
-    havePeerAddr = true;
-    gFailedPeers.clear();
-    Serial.printf("iPhone connected to our peripheral (handle=%u)\n", connInfo.getConnHandle());
-    setStatus("Securing...", 1200);
-    NimBLEDevice::startSecurity(connInfo.getConnHandle());
-  }
-  void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
-    gLink.serverLinked = false;
-    Serial.printf("iPhone disconnected (server), reason=%d\n", reason);
-    clearNotif();
-    setStatus("Advertising", 0);
-    pServer->getAdvertising()->start();
-  }
-  void onAuthenticationComplete(NimBLEConnInfo& /*connInfo*/) override {
-    Serial.println("Link encrypted. Scanning to back-connect...");
-    gFailedPeers.clear();
-    // Use scan (connectable + Apple mfg) to get a proper RPA + type
-    scheduleScanStart(200);
-  }
-};
-
-// NimBLE 2.3 signatures:
-class ScanCallbacks : public NimBLEScanCallbacks {
-  static bool isApple(const std::string& mfg) {
-    if (mfg.size() < 2) return false;
-    const uint8_t* d = (const uint8_t*)mfg.data();
-    return (d[0] == 0x4C && d[1] == 0x00); // 0x004C little-endian
-  }
-  void onDiscovered(const NimBLEAdvertisedDevice* dev) override {
-    if (!dev->isConnectable()) return;
-
-    // Prefer exact peer address if we have it
-    if (havePeerAddr && dev->getAddress().equals(gPeerAddr)) {
-      Serial.println("[SCAN] Found same iPhone address; scheduling connect");
-      if (gPendingDev) { delete gPendingDev; gPendingDev = nullptr; }
-      gPendingDev = new NimBLEAdvertisedDevice(*dev); // COPY (keeps addr type)
-      scheduleScanStop();
-      connectPending = true;
-      return;
-    }
-    // Else Apple device (likely your iPhone)
-    if (dev->haveManufacturerData() && isApple(dev->getManufacturerData())) {
-      if (!gLink.serverLinked && recentlyFailed(dev)) {
-        Serial.printf("[SCAN] Skipping Apple device %s (recent failure)\n",
-                      dev->getAddress().toString().c_str());
-        return;
-      }
-      Serial.printf("[SCAN] Found Apple device %s; scheduling connect\n", dev->getAddress().toString().c_str());
-      if (gPendingDev) { delete gPendingDev; gPendingDev = nullptr; }
-      gPendingDev = new NimBLEAdvertisedDevice(*dev); // COPY
-      scheduleScanStop();
-      connectPending = true;
-    }
-  }
-  void onScanEnd(const NimBLEScanResults& /*results*/, int /*reason*/) override {
-    // handled in loop
-  }
-};
-
-// =================== Input ===================
-void calibrateCenter() {
-  long sx=0, sy=0;
-  for (int i=0;i<24;i++){ sx+=analogRead(JOY_X_PIN); sy+=analogRead(JOY_Y_PIN); delay(4); }
-  midX=sx/24; midY=sy/24; emaX=0; emaY=0;
-}
-void smoothRead() {
-  int rx=analogRead(JOY_X_PIN);
-  int ry=analogRead(JOY_Y_PIN);
-  emaX = (1.0f-EMA_ALPHA)*emaX + EMA_ALPHA*(rx-midX);
-  emaY = (1.0f-EMA_ALPHA)*emaY + EMA_ALPHA*(ry-midY);
-}
-
-// =================== Setup ===================
+// ---------------- Setup ----------------
 void setup(){
   Serial.begin(115200);
-
   pinMode(JOY_SW_PIN, INPUT_PULLUP);
   analogReadResolution(12);
+  calibrateCenter();
 
-  WireTop.begin(TOP_SDA, TOP_SCL);
-  WireBot.begin(BOT_SDA, BOT_SCL);
-
-  if (!oledTop.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) Serial.println("Top OLED init failed");
-  if (!oledBot.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) Serial.println("Bottom OLED init failed");
-
-  // rotate 180°
-  oledTop.setRotation(2);
-  oledBot.setRotation(2);
-  oledTop.clearDisplay(); oledTop.display();
-  oledBot.clearDisplay(); oledBot.display();
-
-  // Boot screen
-  oledTop.setTextColor(SSD1306_WHITE);
-  oledTop.setTextSize(2);
-  oledTop.setCursor(16,8); oledTop.print("BIKE OS");
-  oledTop.display();
-  oledBot.setTextColor(SSD1306_WHITE);
-  oledBot.setTextSize(1);
-  oledBot.setCursor(28,10); oledBot.print("Booting...");
-  oledBot.display();
-  delay(700);
-
-  // ---- NimBLE init (order matters) ----
-  NimBLEDevice::init("BikeRemote");              // 1) init
-  NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT); // use RPA identity
+  NimBLEDevice::init("BikeHID");
+  NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setMTU(185);
-  NimBLEDevice::setSecurityAuth(true,true,true);
+  NimBLEDevice::setSecurityAuth(true,false,true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
-  uint8_t keyMask = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+  uint8_t keyMask=BLE_SM_PAIR_KEY_DIST_ENC|BLE_SM_PAIR_KEY_DIST_ID;
   NimBLEDevice::setSecurityInitKey(keyMask);
   NimBLEDevice::setSecurityRespKey(keyMask);
 
-  // Server/peripheral
-  gServer = NimBLEDevice::createServer();
-  gServer->setCallbacks(new ServerCallbacks());
+  NimBLEServer* server=NimBLEDevice::createServer();
+  server->setCallbacks(new ServerCallbacks());
 
-  // Advertise
-  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-  adv->setName("BikeRemote");
-  adv->addServiceUUID(UUID_ANCS_SVC);
-  adv->addServiceUUID(UUID_AMS_SVC);
+  // DIS
+  NimBLEService* dis=server->createService("180A");
+  dis->createCharacteristic("2A29", NIMBLE_PROPERTY::READ)->setValue("BikeRemote");
+  dis->createCharacteristic("2A24", NIMBLE_PROPERTY::READ)->setValue("Model-CC");
+  dis->start();
+
+  // Battery (optional)
+  NimBLEService* batt=server->createService("180F");
+  gBattChar=batt->createCharacteristic("2A19", NIMBLE_PROPERTY::READ|NIMBLE_PROPERTY::NOTIFY);
+  uint8_t lvl=100; gBattChar->setValue(&lvl,1);
+  batt->start();
+
+  // HID
+  gHid=new NimBLEHIDDevice(server);
+  gHid->setManufacturer("BikeRemote");
+  gHid->setHidInfo(0x00,0x00);
+
+  const uint8_t reportMap[]={
+    0x05,0x0C, 0x09,0x01, 0xA1,0x01,        // Consumer Control
+    0x85,0x01, 0x15,0x00, 0x26,0x9C,0x02,   // Report ID 1, Logical Max 0x29C
+    0x19,0x00, 0x2A,0x9C,0x02,
+    0x95,0x01, 0x75,0x10, 0x81,0x00,        // 16-bit input
+    0xC0
+  };
+  gHid->setReportMap((uint8_t*)reportMap, sizeof(reportMap));
+
+  gInputReport=gHid->getInputReport(1);
+  if(gInputReport){
+    NimBLEDescriptor* repRef=gInputReport->createDescriptor("2908", NIMBLE_PROPERTY::READ);
+    const char ref[2]={0x01,0x01}; repRef->setValue(std::string(ref,2));
+  }
+
+  gHid->startServices();
+
+  NimBLEAdvertising* adv=NimBLEDevice::getAdvertising();
+  NimBLEAdvertisementData advData;
+  advData.setFlags(0x06);
+  advData.setAppearance(0x03C0);
+  advData.setName("BikeHID");
+  advData.addServiceUUID(gHid->getHidService()->getUUID());
+  advData.addServiceUUID("180F");
+  adv->setAdvertisementData(advData);
   adv->start();
 
-  // Scanner for client back-connect
-  gScan = NimBLEDevice::getScan();
-  gScan->setScanCallbacks(new ScanCallbacks(), false);
-  gScan->setInterval(45);
-  gScan->setWindow(30);
-  gScan->setActiveScan(true);
-
-  calibrateCenter();
-  setStatus("Advertising", 0);
-  refreshDisplay();
-
-  // Kick off scanning after boot
-  scheduleScanStart(400);
+  Serial.println("Advertising as BikeHID (HID Consumer Control)");
 }
 
-// =================== Loop ===================
+// ---------------- Loop ----------------
 void loop(){
-  uint32_t now = millis();
+  uint32_t now=millis();
+  smoothAndNormalize();
 
-  // Expire overlays
-  if (notifActive && notifUntil && now > notifUntil) clearNotif();
-  if (statusActive && statusUntil && now > statusUntil) clearStatus();
+  // Button neutral gate
+  bool quietOK = (quietStart && (now-quietStart)>=QUIET_BEFORE_ARM_MS);
+  // *** FIX: Always allow button actions (btnEligible=true) unless cleared by a specific action
+  if (!btnWasDown) btnEligible = true; // Set to true only if button is not currently down
 
-  // Safe scan stop/start outside callbacks
-  if (scanStopPending) {
-    scanStopPending = false;
-    if (gScan->isScanning()) gScan->stop();
+  // Stable button (and block soon after XY)
+  bool btnLowStable = readButtonStable(now);
+  bool btnDown = btnLowStable;
+  if (btnDown && !btnWasDown) btnDownAt=now;
+
+  // Long-press -> Siri
+  static bool siriFired=false;
+  if (btnDown && !siriFired && (now-btnDownAt>=SIRI_HOLD_MS) && // Removed btnEligible check
+      (now - lastXYActionAt >= MUTEX_BTN_AFTER_XY_MS)) {
+    Serial.println("[BTN] Voice Command (Siri)");
+    sendConsumer(CC_VOICE_CMD);
+    lastBtnActionAt = now;
+    siriFired=true;
   }
-  if (scanStartPending && now >= scanStartAtMs) {
-    scanStartPending = false;
-    if (!gScan->isScanning()) { Serial.println("[SCAN] start"); gScan->start(0, false); }
-  }
+  if (!btnDown) siriFired=false;
 
-  // Handle requested client connect using the COPIED advertised device
-  if (connectPending) {
-    connectPending = false;
-
-    if (!gPendingDev) {
-      // nothing to connect to; rescan
-      scheduleScanStart(300);
-    } else {
-      if (!gClient) {
-        gClient = NimBLEDevice::createClient();
-        gClient->setClientCallbacks(new ClientCallbacks());
-        gClient->setConnectionParams(24, 40, 0, 100);
-        gClient->setConnectTimeout(10);
-      }
-      if (gClient->isConnected()) gClient->disconnect();
-
-      Serial.printf("Connecting back to iPhone at %s ...\n", gPendingDev->getAddress().toString().c_str());
-      bool ok = gClient->connect(gPendingDev); // preserves addr TYPE (public/random)
-      if (ok) {
-        Serial.println("[CLIENT] Connected; discovering AMS/ANCS...");
-
-        clearFailureFor(gPendingDev);
-
-        gLink.clientLinked = true;
-        gLink.amsReady = gLink.ancsReady = false;
-        chAmsCmd = chAmsUpd = chAmsAttr = nullptr;
-        chAncsCtrl = chAncsData = chAncsSrc = nullptr;
-
-        // AMS
-        if (auto svc = gClient->getService(UUID_AMS_SVC)) {
-          chAmsCmd  = svc->getCharacteristic(UUID_AMS_REMOTE_COMMAND);
-          chAmsUpd  = svc->getCharacteristic(UUID_AMS_ENTITY_UPDATE);
-          chAmsAttr = svc->getCharacteristic(UUID_AMS_ENTITY_ATTRIBUTE);
-          if (chAmsUpd && chAmsUpd->canNotify()) {
-            chAmsUpd->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
-              if (len < 3) return;
-              uint8_t entity = data[0], attr=data[1];
-              String value = (len>2)? String((const char*)&data[2], len-2):String("");
-              value = cleanText(value);
-              if (entity==AMS_ENTITY_TRACK) {
-                if (attr==AMS_TRACK_ARTIST) { if (nowArtist!=value){ nowArtist=value; refreshDisplay(); } }
-                else if (attr==AMS_TRACK_ALBUM) { if (nowAlbum!=value){ nowAlbum=value; refreshDisplay(); } }
-                else if (attr==AMS_TRACK_TITLE) { if (nowTitle!=value){ nowTitle=value; updateSongMetrics(); refreshDisplay(); } }
-              }
-            });
-          }
-          if (chAmsAttr) amsSubscribeTrack();
-          gLink.amsReady = (chAmsCmd != nullptr);
-        }
-
-        // ANCS
-        if (auto svcN = gClient->getService(UUID_ANCS_SVC)) {
-          chAncsSrc  = svcN->getCharacteristic(UUID_ANCS_NOTIFICATION_SOURCE);
-          chAncsCtrl = svcN->getCharacteristic(UUID_ANCS_CONTROL_POINT);
-          chAncsData = svcN->getCharacteristic(UUID_ANCS_DATA_SOURCE);
-          if (chAncsSrc && chAncsSrc->canNotify()) {
-            chAncsSrc->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
-              ancsHandleNotificationSource(data, len);
-            });
-          }
-          if (chAncsData && chAncsData->canNotify()) {
-            chAncsData->subscribe(true, [](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
-              ancsHandleData(data, len);
-            });
-          }
-          gLink.ancsReady = (chAncsCtrl && chAncsData);
-        }
-
-        Serial.printf("[CLIENT] Ready AMS:%d ANCS:%d\n", gLink.amsReady, gLink.ancsReady);
-        setStatus("iPhone linked", 1200);
-        refreshDisplay();
-
-        // Keep scanning (address may rotate); harmless
-        scheduleScanStart(1000);
-      } else {
-        Serial.println("Back-connect failed; will scan");
-        rememberFailure(gPendingDev);
-        scheduleScanStart(400);
-      }
-      delete gPendingDev; gPendingDev=nullptr;
+  // Release -> short press (Play/Pause)
+  if (!btnDown && btnWasDown) {
+    if ((now - btnDownAt) < SIRI_HOLD_MS &&
+        !siriFired) { // Removed btnEligible check
+      Serial.println("[BTN] Play/Pause");
+      sendConsumer(CC_PLAY_PAUSE);
+      lastBtnActionAt=now;
     }
-  }
-
-  // Inputs
-  smoothRead();
-
-  // Button: short press = toggle, long press clears bonds and restarts
-  bool btnDown = (digitalRead(JOY_SW_PIN) == LOW);
-  if (btnDown && !btnWasDown) btnDownAt = now;
-  if (btnDown && (now - btnDownAt > BOND_CLEAR_HOLD_MS)) {
-    Serial.println("Long press: Clearing bonds + restart");
-    NimBLEDevice::deleteAllBonds();
-    setStatus("Bonds cleared", 1200);
-    refreshDisplay();
-    delay(1200);
-    ESP.restart();
-  }
-  if (btnDown && (now - tBtn > 280)) {
-    if (!btnWasDown) {
-      tBtn = now;
-      amsSend(AMS_CMD_TOGGLE);
-      setStatus("Play/Pause", 800);
-      refreshDisplay();
-    }
+    btnEligible=false; 
   }
   btnWasDown = btnDown;
 
-  // Vol +/- (Y)
-  if (!inDZ(emaY) && beyond(emaY)) {
-    if (emaY < 0 && now - tUp > VOL_REPEAT_MS) {
-      amsSend(AMS_CMD_VOL_UP);
-      setStatus("Vol +", 600);
-      refreshDisplay();
-      tUp = now;
-    } else if (emaY > 0 && now - tDn > VOL_REPEAT_MS) {
-      amsSend(AMS_CMD_VOL_DOWN);
-      setStatus("Vol -", 600);
-      refreshDisplay();
-      tDn = now;
+  bool allowXY = (now - lastBtnActionAt >= MUTEX_XY_AFTER_BTN_MS);
+
+  // -------- Volume (Y) --------
+  float ay=fabsf(ny);
+  if (!volArmed) {
+    if (allowXY && ay>=THRESH_PCT_Y) {
+      if (!volArmStart) volArmStart=now;
+      if (now - volArmStart >= ARM_DWELL_MS) volArmed=true;
+    } else volArmStart=0;
+  }
+  if (volArmed && ay<=RELEASE_PCT) { volArmed=false; volArmStart=0; yUpHold=yDnHold=false; }
+
+  if (allowXY && volArmed) {
+    if (ny>0) {
+      yDnHold=false;
+      if (!yUpHold || (now - tUp >= VOL_REPEAT_MS)) {
+        Serial.println("[JOY Y] Vol+");
+        sendConsumer(CC_VOL_UP);
+        yUpHold=true; tUp=now; lastXYActionAt=now;
+      }
+    } else if (ny<0) {
+      yUpHold=false;
+      if (!yDnHold || (now - tDn >= VOL_REPEAT_MS)) {
+        Serial.println("[JOY Y] Vol-");
+        sendConsumer(CC_VOL_DOWN);
+        yDnHold=true; tDn=now; lastXYActionAt=now;
+      }
     }
   }
 
-  // Next/Prev (X)
-  if (!inDZ(emaX) && beyond(emaX)) {
-    if (emaX < 0 && now - tR > ACTION_COOLDOWN) {
-      amsSend(AMS_CMD_NEXT);
-      setStatus("Next >", 800);
-      refreshDisplay();
-      tR = now;
-    } else if (emaX > 0 && now - tL > ACTION_COOLDOWN) {
-      amsSend(AMS_CMD_PREV);
-      setStatus("< Prev", 800);
-      refreshDisplay();
-      tL = now;
+  // -------- Prev/Next (X) --------
+  float ax=fabsf(nx);
+  if (!xArmed) {
+    if (allowXY && ax>=THRESH_PCT_X && ay<=RELEASE_PCT && !btnDown) { 
+      if (!xArmStart) xArmStart=now;
+      if (now - xArmStart >= ARM_DWELL_MS) xArmed=true;
+    } else xArmStart=0;
+  }
+  if (xArmed && ax<=RELEASE_PCT) { xArmed=false; xArmStart=0; }
+
+  if (allowXY && xArmed) {
+    if (nx<0 && (now - tL >= ACTION_COOLDOWN_MS)) {
+      Serial.println("[JOY X] Prev");
+      sendConsumer(CC_SCAN_PREV);
+      tL=now; lastXYActionAt=now;
+    } else if (nx>0 && (now - tR >= ACTION_COOLDOWN_MS)) {
+      Serial.println("[JOY X] Next");
+      sendConsumer(CC_SCAN_NEXT);
+      tR=now; lastXYActionAt=now;
     }
   }
 
-  // Scroll song if no overlays
-  if (!notifActive && !statusActive) {
-    if (songPixelWidth > 128 && (now - lastScroll > 150)) {
-      scrollOffset++;
-      if (scrollOffset > songPixelWidth + 24) scrollOffset = 0;
-      lastScroll = now;
-    }
+#if DEBUG_PRINT
+  static uint32_t dbg=0;
+  if (now-dbg>250){ dbg=now;
+    Serial.printf("nx=%.2f ny=%.2f peakX=%.1f peakY=%.1f quiet=%d | btnDown=%d btnEligible=%d siriFired=%d\n",
+      nx,ny,peakX,peakY,(int)(quietStart!=0), (int)btnDown, (int)btnEligible, (int)siriFired);
   }
+#endif
 
-  // Periodic diagnostics (single ticker)
-  if (now - gDiagTick > 2000) {
-    gDiagTick = now;
-    Serial.printf("[DIAG] srv=%d cli=%d ams=%d ancs=%d scan=%d\n",
-      gLink.serverLinked?1:0, gLink.clientLinked?1:0,
-      gLink.amsReady?1:0, gLink.ancsReady?1:0,
-      gScan->isScanning()?1:0);
-  }
-
-  refreshDisplay();
-  delay(6);
+  delay(5);
 }
